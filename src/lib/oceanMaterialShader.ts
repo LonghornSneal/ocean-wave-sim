@@ -1,7 +1,11 @@
 import type * as THREE from 'three';
 import type { OceanUniforms } from './oceanMaterial';
 
-export function applyOceanMaterialShader(shader: THREE.Shader, uniforms: OceanUniforms, maxWaves: number): void {
+export function applyOceanMaterialShader(
+  shader: THREE.WebGLProgramParametersWithUniforms,
+  uniforms: OceanUniforms,
+  maxWaves: number
+): void {
   // Attach uniforms
   shader.uniforms.u_time = uniforms.u_time;
   shader.uniforms.u_origin = uniforms.u_origin;

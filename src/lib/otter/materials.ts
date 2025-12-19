@@ -147,7 +147,7 @@ export function applyOtterMaterials(opts: {
   }
 
   // Apply to meshes based on original material names.
-  model.traverse((o) => {
+  model.traverse((o: THREE.Object3D) => {
     const anyO = o as any;
     if (!anyO.isMesh) return;
     const mat = anyO.material as THREE.Material | THREE.Material[];
@@ -188,7 +188,7 @@ function applyFurRimCheat(
   strength: number,
   power: number
 ): void {
-  mat.onBeforeCompile = (shader) => {
+  mat.onBeforeCompile = (shader: THREE.WebGLProgramParametersWithUniforms) => {
     shader.uniforms.u_rimColor = { value: rimColor };
     shader.uniforms.u_rimStrength = { value: strength };
     shader.uniforms.u_rimPower = { value: power };

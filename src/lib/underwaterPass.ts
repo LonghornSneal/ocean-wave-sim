@@ -1,4 +1,4 @@
-import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { UnderwaterShader } from './underwater';
 
 /**
@@ -19,7 +19,6 @@ export class UnderwaterPostPass extends ShaderPass {
     (this.uniforms as any).tDepth.value = depthTex;
     (this.uniforms as any).u_hasDepth.value = depthTex ? 1.0 : 0.0;
     // Call base ShaderPass render (binds tDiffuse).
-    // @ts-expect-error - ShaderPass render signature varies slightly by three version.
     super.render(renderer, writeBuffer, readBuffer, deltaTime, maskActive);
   }
 }

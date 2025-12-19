@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 
 export function disposeObject3D(root: THREE.Object3D): void {
-  root.traverse((o) => {
+  root.traverse((o: THREE.Object3D) => {
     const anyO = o as any;
     if (anyO.geometry && typeof anyO.geometry.dispose === 'function') {
       anyO.geometry.dispose();

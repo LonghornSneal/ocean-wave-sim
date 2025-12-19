@@ -68,7 +68,7 @@ export class PlanarReflectionController {
     dtEma_s: number;
     params: AppParams;
     scene: THREE.Scene;
-    camera: THREE.Camera;
+    camera: THREE.PerspectiveCamera;
     tideHeight_m: number;
     storminess: number;
     foamBoost: number;

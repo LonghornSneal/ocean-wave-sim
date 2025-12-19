@@ -360,9 +360,9 @@ export class FoamField {
     let sy = 0;
     let sw = 0;
     for (const w of opt.waves) {
-      const weight = w.A_m * w.A_m;
-      sx += Math.cos(w.dirTo_rad) * weight;
-      sy += Math.sin(w.dirTo_rad) * weight;
+      const weight = w.A * w.A;
+      sx += w.dirX * weight;
+      sy += w.dirZ * weight;
       sw += weight;
     }
     const meanLen = sw > 1e-8 ? Math.sqrt(sx * sx + sy * sy) / sw : 1.0;

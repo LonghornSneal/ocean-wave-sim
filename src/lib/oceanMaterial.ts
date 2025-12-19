@@ -123,7 +123,7 @@ const MICRO_NORMALS = makeMicroNormalSet();
 
 export class OceanMaterial {
   public readonly material: THREE.MeshPhysicalMaterial;
-  private shader: THREE.Shader | null = null;
+  private shader: THREE.WebGLProgramParametersWithUniforms | null = null;
   public readonly uniforms: OceanUniforms;
 
   constructor(params: OceanMaterialParams) {
@@ -200,7 +200,7 @@ export class OceanMaterial {
     // Assign initial wave data
     this.setWaves(params.waves);
 
-    this.material.onBeforeCompile = (shader: THREE.Shader) => {
+    this.material.onBeforeCompile = (shader: THREE.WebGLProgramParametersWithUniforms) => {
       applyOceanMaterialShader(shader, this.uniforms, MAX_WAVES);
       this.shader = shader;
     };
