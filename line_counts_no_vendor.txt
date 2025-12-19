@@ -1,0 +1,43 @@
+1501	package-lock.json
+954	src/lib/otter.ts
+590	src/main.ts
+557	src/lib/oceanMaterial.ts
+500	src/lib/ui.ts
+413	src/lib/weather.ts
+352	src/lib/foamField.ts
+336	src/lib/clouds.ts
+329	scripts/gen_otter_glbs.py
+263	src/lib/spectrum.ts
+203	src/lib/life.ts
+198	src/lib/wavePhysics.ts
+195	src/lib/lightningBolts.ts
+188	src/lib/waterReflection.ts
+182	src/lib/underwater.ts
+164	src/lib/audio.ts
+140	src/lib/microNormals.ts
+124	src/lib/windSpray.ts
+109	src/lib/wakeRibbon.ts
+108	src/lib/causticsTexture.ts
+105	src/lib/precip.ts
+100	src/lib/otterCamera.ts
+98	src/lib/splashes.ts
+94	scripts/physics.test.ts
+94	src/lib/ripples.ts
+86	src/lib/islands.ts
+81	src/lib/rainbow.ts
+78	src/lib/celestial.ts
+69	src/lib/perfOverlay.ts
+69	src/lib/waveSample.ts
+61	src/lib/overlay.ts
+57	src/lib/grading.ts
+49	src/lib/prng.ts
+41	README.md
+40	index.html
+28	src/lib/math.ts
+23	src/lib/underwaterPass.ts
+22	package.json
+20	tsconfig.json
+7	vite.config.ts
+0	public/models/otter/otter_high.glb	BINARY_OR_UNREADABLE
+0	public/models/otter/otter_low.glb	BINARY_OR_UNREADABLE
+0	public/models/otter/otter_medium.glb	BINARY_OR_UNREADABLE
