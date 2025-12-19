@@ -858,6 +858,11 @@ function handleContextRestored(): void {
 
 window.addEventListener('beforeunload', () => {
   if (envRT) envRT.dispose();
+  try { composer?.dispose?.(); } catch { /* ignore */ }
+  try { composerDepthTex?.dispose?.(); } catch { /* ignore */ }
+  try { ssrPass?.dispose?.(); } catch { /* ignore */ }
+  try { underwaterPass?.dispose?.(); } catch { /* ignore */ }
+  try { gradePass?.dispose?.(); } catch { /* ignore */ }
   pmrem.dispose();
   planarRefl?.dispose();
   foamField.dispose();
@@ -869,6 +874,7 @@ window.addEventListener('beforeunload', () => {
   perfOverlay.dispose();
   precip.dispose();
   splashes.dispose();
+  renderer.dispose();
   void audio.close();
 });
 
