@@ -9,6 +9,8 @@ export interface SplashUpdate {
   slope: number; // 0..1+
   intensity: number; // 0..1
   windDirTo_rad: number;
+  /** 0..1. Bias spawn toward the otter body for spray. */
+  sprayBias01?: number;
 }
 
 export class SplashSystem {
@@ -54,13 +56,16 @@ export class SplashSystem {
 
     // Spawn rate based on steepness & intensity.
     const s = clamp((u.slope - 0.22) / 0.35, 0, 1);
-    const rate = (s * s) * lerp(8, 55, u.intensity); // particles per second
+    const spray = clamp(u.sprayBias01 ?? 0, 0, 1);
+    const rate = (s * s) * lerp(10, 75, u.intensity) * (0.7 + 0.6 * spray); // particles per second
 
     const toX = Math.cos(u.windDirTo_rad);
     const toZ = Math.sin(u.windDirTo_rad);
 
-    const spawnN = Math.min(12, Math.floor(rate * dt));
-    for (let i = 0; i < spawnN; i++) this.spawn(u.origin, u.surfaceY, toX, toZ, u.intensity);
+    const bodyY = Math.max(u.surfaceY + 0.05, u.origin.y + 0.12);
+    const spawnY = lerp(u.surfaceY + 0.05, bodyY, spray);
+    const spawnN = Math.min(14, Math.floor(rate * dt));
+    for (let i = 0; i < spawnN; i++) this.spawn(u.origin, spawnY, u.surfaceY, toX, toZ, u.intensity, spray);
 
     // Update all particles
     let any = false;
@@ -84,7 +89,7 @@ export class SplashSystem {
     mat.opacity += (targetOpacity - mat.opacity) * clamp(dt * 3.0, 0, 1);
   }
 
-  private spawn(origin: THREE.Vector3, surfaceY: number, toX: number, toZ: number, intensity: number): void {
+  private spawn(origin: THREE.Vector3, spawnY: number, surfaceY: number, toX: number, toZ: number, intensity: number, spray: number): void {
     const i = this.idx++ % this.max;
     this.life[i] = lerp(0.6, 1.4, this.rng()) * (0.6 + 0.4 * intensity);
 
@@ -92,7 +97,7 @@ export class SplashSystem {
     const r = (this.rng() * 2 - 1) * 0.65;
     const r2 = (this.rng() * 2 - 1) * 0.65;
     this.pos[ix + 0] = origin.x + r;
-    this.pos[ix + 1] = surfaceY + 0.05;
+    this.pos[ix + 1] = spawnY + (this.rng() * 2 - 1) * 0.06 * spray;
     this.pos[ix + 2] = origin.z + r2;
 
     // Eject up and slightly downwind

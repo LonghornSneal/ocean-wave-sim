@@ -24,6 +24,18 @@ export interface CloudUpdate {
   quality: QualityMode;
 }
 
+export interface CloudDeckOptions {
+  radius?: number;
+  layerOffset?: number;
+  densityScale?: number;
+  opacityScale?: number;
+  coverScale?: number;
+  stormScale?: number;
+  rainScale?: number;
+  windScale?: number;
+  stepsScale?: number;
+}
+
 /**
  * Volumetric-ish cloud dome.
  *
@@ -39,14 +51,32 @@ export class CloudDeck {
   public readonly mesh: THREE.Mesh;
 
   private readonly uniforms: Record<string, { value: any }>;
+  private readonly layerOffset: number;
+  private readonly densityScale: number;
+  private readonly opacityScale: number;
+  private readonly coverScale: number;
+  private readonly stormScale: number;
+  private readonly rainScale: number;
+  private readonly windScale: number;
+  private readonly stepsScale: number;
 
   // State (no per-frame allocations)
   private opacity = 0;
   private readonly windOffset = new THREE.Vector2(0, 0);
   private readonly windDirXZ = new THREE.Vector2(1, 0);
 
-  constructor() {
-    const geo = new THREE.SphereGeometry(9000, 64, 32);
+  constructor(options: CloudDeckOptions = {}) {
+    const radius = options.radius ?? 9000;
+    this.layerOffset = options.layerOffset ?? 0.0;
+    this.densityScale = options.densityScale ?? 1.0;
+    this.opacityScale = options.opacityScale ?? 1.0;
+    this.coverScale = options.coverScale ?? 1.0;
+    this.stormScale = options.stormScale ?? 1.0;
+    this.rainScale = options.rainScale ?? 1.0;
+    this.windScale = options.windScale ?? 1.0;
+    this.stepsScale = options.stepsScale ?? 1.0;
+
+    const geo = new THREE.SphereGeometry(radius, 64, 32);
 
     this.uniforms = {
       u_time: { value: 0.0 },
@@ -66,6 +96,8 @@ export class CloudDeck {
 
       // Smoothed opacity derived from cover
       u_opacity: { value: 0.0 },
+      u_layerOffset: { value: this.layerOffset },
+      u_densityScale: { value: this.densityScale },
 
       // Ray steps (float for WebGL1 compatibility in break conditions)
       u_steps: { value: 8.0 }
@@ -108,6 +140,8 @@ export class CloudDeck {
         uniform vec3  u_lightningDir;
 
         uniform float u_opacity;
+        uniform float u_layerOffset;
+        uniform float u_densityScale;
         uniform float u_steps;
 
         // ---- small 3D value noise + fBm ----
@@ -254,8 +288,9 @@ export class CloudDeck {
             p += wind * 18.0;
             p += vec3(0.0, u_time * 0.02, 0.0);
             p += vec3(0.0, h * 2.25, 0.0);
+            p += vec3(0.0, u_layerOffset, 0.0);
 
-            float dens = densityAt(p, cover, storm, rain);
+            float dens = densityAt(p, cover, storm, rain) * u_densityScale;
             dens *= coverVis;
             dens *= horizon;
 
@@ -335,12 +370,12 @@ export class CloudDeck {
     // Follow camera so the dome feels infinite.
     this.mesh.position.copy(u.center);
 
-    const cover = clamp(u.cloudCover, 0, 1);
-    const storm = clamp(Math.max(u.storminess, u.hurricaneIntensity), 0, 1);
-    const rain = clamp(u.precipIntensity, 0, 1);
+    const cover = clamp(u.cloudCover * this.coverScale, 0, 1);
+    const storm = clamp(Math.max(u.storminess, u.hurricaneIntensity) * this.stormScale, 0, 1);
+    const rain = clamp(u.precipIntensity * this.rainScale, 0, 1);
 
     // Opacity ramps in with cover.
-    const targetOpacity = clamp((cover - 0.08) / 0.92, 0, 1) * 0.92;
+    const targetOpacity = clamp((cover - 0.08) / 0.92, 0, 1) * 0.92 * this.opacityScale;
     this.opacity = lerp(this.opacity, targetOpacity, clamp(u.dt_s * 0.8, 0, 1));
 
     // Wind: move *to* the wind direction.
@@ -348,12 +383,13 @@ export class CloudDeck {
     this.windDirXZ.set(Math.cos(dirTo), Math.sin(dirTo));
 
     // Subtle drift in noise-space to avoid motion sickness on mobile.
-    const v = (0.000010 + u.windSpeed_mps * 0.0000022) * (0.25 + 0.75 * cover);
+    const v = (0.000010 + u.windSpeed_mps * 0.0000022 * this.windScale) * (0.25 + 0.75 * cover);
     this.windOffset.x += this.windDirXZ.x * v * u.dt_s;
     this.windOffset.y += this.windDirXZ.y * v * u.dt_s * 0.35;
 
     // Quality → raymarch steps.
-    const steps = (u.quality === 'Low') ? 4 : (u.quality === 'Medium' ? 6 : (u.quality === 'High' ? 8 : 10));
+    const baseSteps = (u.quality === 'Low') ? 4 : (u.quality === 'Medium' ? 6 : (u.quality === 'High' ? 8 : 10));
+    const steps = clamp(baseSteps * this.stepsScale, 3, 10);
 
     // Uniform updates (no allocations).
     this.uniforms.u_time.value = u.time_s;

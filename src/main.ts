@@ -39,6 +39,8 @@ import { sampleGerstner } from './lib/waveSample';
 import { OceanAudio } from './lib/audio';
 import { OverlayHint } from './lib/overlay';
 import { PerfOverlay } from './lib/perfOverlay';
+import { LightningBolts } from './lib/lightningBolts';
+import { WindSpray } from './lib/windSpray';
 
 // ---------- Renderer / scene ----------
 
@@ -508,8 +510,54 @@ scene.add(life.group);
 let precip = new PrecipitationSystem(params.quality);
 scene.add(precip.group);
 
-const clouds = new CloudDeck();
-scene.add(clouds.mesh);
+const cloudsLow = new CloudDeck({
+  layerOffset: -0.18,
+  densityScale: 1.1,
+  opacityScale: 1.0,
+  coverScale: 1.0,
+  stormScale: 1.05,
+  rainScale: 1.0,
+  windScale: 0.85,
+  stepsScale: 1.0
+});
+cloudsLow.mesh.renderOrder = -12;
+scene.add(cloudsLow.mesh);
+
+const cloudsMid = new CloudDeck({
+  layerOffset: 0.22,
+  densityScale: 0.85,
+  opacityScale: 0.7,
+  coverScale: 0.78,
+  stormScale: 0.9,
+  rainScale: 0.75,
+  windScale: 1.05,
+  stepsScale: 0.75
+});
+cloudsMid.mesh.renderOrder = -11;
+scene.add(cloudsMid.mesh);
+
+const cloudsHigh = new CloudDeck({
+  layerOffset: 0.68,
+  densityScale: 0.55,
+  opacityScale: 0.55,
+  coverScale: 0.58,
+  stormScale: 0.65,
+  rainScale: 0.45,
+  windScale: 1.25,
+  stepsScale: 0.6
+});
+cloudsHigh.mesh.renderOrder = -10;
+scene.add(cloudsHigh.mesh);
+
+const cloudLayers = [
+  { deck: cloudsLow, minQuality: 'Low' as AppParams['quality'] },
+  { deck: cloudsMid, minQuality: 'Medium' as AppParams['quality'] },
+  { deck: cloudsHigh, minQuality: 'High' as AppParams['quality'] }
+];
+const QUALITY_RANK: Record<AppParams['quality'], number> = { Low: 0, Medium: 1, High: 2, Max: 3 };
+
+const lightningBolts = new LightningBolts();
+scene.add(lightningBolts.group);
 
 const islands = new HorizonIslands();
 scene.add(islands.group);
@@ -519,6 +567,9 @@ scene.add(rainbow.mesh);
 
 const splashes = new SplashSystem();
 scene.add(splashes.points);
+
+const windSpray = new WindSpray();
+scene.add(windSpray.points);
 
 const ripples = new OtterRipples();
 scene.add(ripples.mesh);
@@ -641,8 +692,8 @@ let lastQuality = params.quality;
 function resetSimulation(): void {
   simTime_s = 0;
   // Start *immediately* in a dramatic sea-state (no long "wave growth" ramp).
-  seaHs_m = 10.5;
-  seaTp_s = 12.8;
+  seaHs_m = 13.5;
+  seaTp_s = 13.8;
   windDirTo_rad = Math.PI;
   swellDirTo_rad = Math.PI;
   wavesCurrent = [];
@@ -662,9 +713,9 @@ function resetSimulation(): void {
       storm01: 1.0,
       // Keep below the hurricane threshold by default (still wicked).
       hurricane01: 0.15,
-      windSpeed_mps: 38.0,
+      windSpeed_mps: 42.0,
       windDirFrom_deg: 42,
-      gustiness01: 0.95,
+      gustiness01: 1.0,
       // Pretend the wind has been blowing for a long time so the sea is fully developed.
       steadyAge_h: 36,
       stormStrength01: 1.0,
@@ -866,7 +917,8 @@ window.addEventListener('beforeunload', () => {
   pmrem.dispose();
   planarRefl?.dispose();
   foamField.dispose();
-  clouds.dispose();
+  for (const layer of cloudLayers) layer.deck.dispose();
+  lightningBolts.dispose();
   rainbow.dispose();
   ripples.dispose();
   wakeRibbon.dispose();
@@ -874,6 +926,7 @@ window.addEventListener('beforeunload', () => {
   perfOverlay.dispose();
   precip.dispose();
   splashes.dispose();
+  windSpray.dispose();
   renderer.dispose();
   void audio.close();
 });
@@ -999,6 +1052,12 @@ function animate(): void {
   // Sunset factor from sun elevation (0 noon-ish, 1 near horizon / below)
   const sunset = clamp(1 - clamp((cel.sunElevation_rad + 0.04) / 0.35, 0, 1), 0, 1);
 
+  // Compute tides (simple semi-diurnal tide)
+  const tidePeriod_s = 12.42 * 3600;
+  const tidePhase = (simTime_s / tidePeriod_s) * Math.PI * 2;
+  const tideAmp = lerp(0.35, 1.25, clamp(params.coastProximity, 0, 1));
+  const tideHeight_m = Math.sin(tidePhase) * tideAmp * cel.tideScale;
+
   // Update sky parameters with weather + sunset haze
   const cc = clamp(wx.cloudCover, 0, 1);
 
@@ -1064,11 +1123,22 @@ function animate(): void {
 
     lightningLight.position.copy(camera.position).addScaledVector(tmpV3c, 220);
     lightningLight.target.position.copy(camera.position);
+
+    const strikeCount = Math.random() < lerp(0.25, 0.6, storminessFx) ? 2 : 1;
+    for (let i = 0; i < strikeCount; i++) {
+      lightningBolts.spawn({
+        cameraPos: camera.position,
+        flashDir: lightningDir,
+        storminess: storminessFx,
+        waterLevel: tideHeight_m
+      });
+    }
   }
 
   lightningFlashFx = lightningFlash01 * flashLimiter;
   const lightningIntensity = lightningFlashFx * lerp(4.0, 32.0, storminessFx);
   lightningLight.intensity = lightningIntensity;
+  lightningBolts.update({ dt_s: dt });
 
   // Sun + moon sprites
   sunSprite.position.copy(camera.position).addScaledVector(sunDir, 4800);
@@ -1083,7 +1153,9 @@ function animate(): void {
 
   // Stars
   stars.position.copy(camera.position);
-  (stars.material as THREE.PointsMaterial).opacity = lerp((stars.material as THREE.PointsMaterial).opacity, clamp(night * (1 - wx.cloudCover), 0, 1), clamp(dt * 0.5, 0, 1));
+  const starStormBlock = clamp(wx.storminess * 0.85 + wx.precipIntensity * 0.95 + wx.hurricaneIntensity * 1.0, 0, 1);
+  const starsTarget = clamp(night * (1 - wx.cloudCover) * (1 - starStormBlock), 0, 1);
+  (stars.material as THREE.PointsMaterial).opacity = lerp((stars.material as THREE.PointsMaterial).opacity, starsTarget, clamp(dt * 0.5, 0, 1));
 
   // Update environment map (PMREM) opportunistically.
   // This is expensive, so we:
@@ -1149,12 +1221,6 @@ function animate(): void {
   }
 
 
-  // Compute tides (simple semi-diurnal tide)
-  const tidePeriod_s = 12.42 * 3600;
-  const tidePhase = (simTime_s / tidePeriod_s) * Math.PI * 2;
-  const tideAmp = lerp(0.35, 1.25, clamp(params.coastProximity, 0, 1));
-  const tideHeight_m = Math.sin(tidePhase) * tideAmp * cel.tideScale;
-
   // Compute surface current from wind (Ekman-ish) + tides
   const windDirTo = (wx.windDirFrom_deg * Math.PI) / 180 + Math.PI;
   const ekman = (params.latitude_deg >= 0 ? Math.PI / 4 : -Math.PI / 4);
@@ -1185,9 +1251,9 @@ function animate(): void {
   // "Superstorm" boost: make violent weather immediately feel like violent
   // weather. (The physics model already increases Hs with U10, but we want the
   // dramatic, colliding cross-sea look the app is going for.)
-  const dramatic = clamp(storminess * 0.95 + wx.hurricaneIntensity * 0.55, 0, 1);
-  const HsTarget = clamp(waveState.Hs_m * lerp(1.0, 1.75, Math.pow(dramatic, 1.55)), 0.4, 18.0);
-  const TpTarget = clamp(waveState.Tp_s * lerp(1.0, 1.22, Math.pow(dramatic, 1.25)), 3.5, 20.0);
+  const dramatic = clamp(storminess * 0.95 + wx.hurricaneIntensity * 0.6 + wx.gustiness * 0.35, 0, 1);
+  const HsTarget = clamp(waveState.Hs_m * lerp(1.0, 2.25, Math.pow(dramatic, 1.45)), 0.4, 24.0);
+  const TpTarget = clamp(waveState.Tp_s * lerp(1.0, 1.32, Math.pow(dramatic, 1.25)), 3.5, 22.0);
 
   seaHs_m = lerp(seaHs_m, HsTarget, kSea);
   seaTp_s = lerp(seaTp_s, TpTarget, kSea);
@@ -1199,12 +1265,12 @@ function animate(): void {
   swellDirTo_rad = lerpAngleRad(swellDirTo_rad, windDirTo_rad, kSwellDir);
 
   // Wave field "randomness" is now internal noise (not a user control).
-  const waveChaos = clamp(0.22 + 0.55 * wx.gustiness + 0.55 * storminess, 0, 1);
-  const directionalSpread = clamp(lerp(0.18, 0.9, waveChaos) + wx.cloudCover * 0.1, 0, 1);
+  const waveChaos = clamp(0.28 + 0.65 * wx.gustiness + 0.65 * storminess, 0, 1);
+  const directionalSpread = clamp(lerp(0.25, 1.0, waveChaos) + storminess * 0.12, 0, 1);
   const crossSea01 = clamp((directionalSpread - 0.55) / 0.45, 0, 1);
   const wind01 = clamp(wx.windSpeed_mps / 18, 0, 1);
   // Slightly higher chop ceiling for the "superstorm" look.
-  const choppiness = clamp(0.85 + 0.85 * waveChaos + 0.45 * wind01, 0.55, 2.15);
+  const choppiness = clamp(0.95 + 1.05 * waveChaos + 0.55 * wind01, 0.65, 2.6);
 
   // How much of the variance is treated as long swell vs wind sea.
   // Calm: more swell; storm: more wind-sea.
@@ -1320,11 +1386,14 @@ function animate(): void {
 
   // Otter update
   const otterosity = clamp(params.otterosity_pct / 100, 0, 1);
+  const interestDir = sunVis > 0.15 ? sunDir : (cel.moonIntensity > 0.18 ? moonDir : undefined);
   otter.update(
     {
       otterosity,
       storminess: clamp(wx.precipIntensity + wx.storminess * 0.7 + wx.hurricaneIntensity, 0, 1),
-      waveChaos
+      waveChaos,
+      windDirTo_rad,
+      interestDir
     },
     {
       dt_s: dt,
@@ -1510,10 +1579,12 @@ function animate(): void {
 
     // You shouldn't see the sky/cloud deck/horizon effects from underwater.
     sky.visible = false;
-    clouds.mesh.visible = false;
+    for (const layer of cloudLayers) layer.deck.mesh.visible = false;
     islands.group.visible = false;
     rainbow.mesh.visible = false;
     splashes.points.visible = false;
+    lightningBolts.group.visible = false;
+    windSpray.points.visible = false;
   } else {
     // Above water: subtle atmospheric haze (sunset-friendly).
     const sunset = clamp(1 - clamp((cel.sunElevation_rad + 0.04) / 0.35, 0, 1), 0, 1);
@@ -1548,10 +1619,12 @@ function animate(): void {
     moonSprite.visible = true;
 
     sky.visible = true;
-    clouds.mesh.visible = true;
+    for (const layer of cloudLayers) layer.deck.mesh.visible = true;
     islands.group.visible = true;
     rainbow.mesh.visible = true;
     splashes.points.visible = true;
+    lightningBolts.group.visible = true;
+    windSpray.points.visible = true;
   }
 
   // Life system
@@ -1567,24 +1640,30 @@ function animate(): void {
   });
 
   // Clouds
-  clouds.update({
-    dt_s: dt,
-    time_s: simTime_s,
-    center: camera.position,
-    cloudCover: wx.cloudCover,
-    windDirFrom_deg: wx.windDirFrom_deg,
-    windSpeed_mps: wx.windSpeed_mps,
-    sunDir,
-    sunColor: sunLight.color,
-    sunIntensity: sunVis,
-    nightFactor: night,
-    lightningFlash01: lightningFlashFx,
-    lightningDir,
-    storminess: wx.storminess,
-    hurricaneIntensity: wx.hurricaneIntensity,
-    precipIntensity: wx.precipIntensity,
-    quality: params.quality
-  });
+  const cloudRank = QUALITY_RANK[params.quality];
+  for (const layer of cloudLayers) {
+    const enabled = cloudRank >= QUALITY_RANK[layer.minQuality];
+    layer.deck.mesh.visible = enabled && !underwater;
+    if (!enabled || underwater) continue;
+    layer.deck.update({
+      dt_s: dt,
+      time_s: simTime_s,
+      center: camera.position,
+      cloudCover: wx.cloudCover,
+      windDirFrom_deg: wx.windDirFrom_deg,
+      windSpeed_mps: wx.windSpeed_mps,
+      sunDir,
+      sunColor: sunLight.color,
+      sunIntensity: sunVis,
+      nightFactor: night,
+      lightningFlash01: lightningFlashFx,
+      lightningDir,
+      storminess: wx.storminess,
+      hurricaneIntensity: wx.hurricaneIntensity,
+      precipIntensity: wx.precipIntensity,
+      quality: params.quality
+    });
+  }
 
   // Precipitation
   precip.update({
@@ -1617,11 +1696,26 @@ function animate(): void {
       (
         clamp(wx.windSpeed_mps / 20, 0, 1) * (0.25 + 0.75 * clamp(wx.storminess + wx.hurricaneIntensity, 0, 1)) * (1.0 + 0.90 * crossSea01)
         + paddleImpulse01 * (0.20 + 0.25 * calmness)
+        + otter.wetness01 * 0.25
       ),
       0,
       1
     ),
-    windDirTo_rad: derived.windDirTo_rad
+    windDirTo_rad: derived.windDirTo_rad,
+    sprayBias01: clamp(otter.wetness01 * 0.7 + storminess * 0.25 + clamp(wx.windSpeed_mps / 30, 0, 1) * 0.2, 0, 1)
+  });
+
+  // Wind-driven spray streaks (sporadic gusts across the surface).
+  windSpray.update({
+    dt_s: dt,
+    time_s: simTime_s,
+    center: camera.position,
+    surfaceY: surf.height_m,
+    windDirTo_rad: windDirTo_rad,
+    windSpeed_mps: wx.windSpeed_mps,
+    gustiness: wx.gustiness,
+    storminess,
+    visible: !underwater
   });
 
   // Audio

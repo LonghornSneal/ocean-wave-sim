@@ -32,6 +32,10 @@ export interface OtterInputs {
   storminess: number; // 0..1
   /** 0..1. Internal “sea chaos” signal (gustiness + irregular waves). */
   waveChaos: number;
+  /** Optional: wind direction the waves travel toward (radians). */
+  windDirTo_rad?: number;
+  /** Optional: interesting sky target (sun/moon), normalized world-space direction. */
+  interestDir?: THREE.Vector3;
 }
 
 export interface OtterUpdateContext {
@@ -96,6 +100,8 @@ export class SeaOtter {
   public lookMode: OtterLookMode = 'Horizon';
 
   private readonly rng = mulberry32(133742);
+  private readonly stormPhase = this.rng() * Math.PI * 2;
+  private readonly stormPhase2 = this.rng() * Math.PI * 2;
   private lookTimer_s = 0;
   private blinkTimer_s = 2.8;
   private yaw = 0;
@@ -266,6 +272,7 @@ export class SeaOtter {
     const storm = clamp(inp.storminess, 0, 1);
     const chaos = clamp(inp.waveChaos, 0, 1);
     const otterosity = clamp(inp.otterosity, 0, 1);
+    const stormFocus = clamp((storm - 0.35) / 0.45, 0, 1);
 
     this.lookTimer_s -= dt;
     this.blinkTimer_s -= dt;
@@ -288,7 +295,7 @@ export class SeaOtter {
     // Use the *delta* in Gerstner horizontal displacement so the otter is
     // visibly tossed around by colliding wave trains, without accumulating a
     // permanent bias.
-    const carry = clamp(0.22 + 1.35 * storm + 1.15 * chaos, 0.18, 2.6);
+    const carry = clamp(0.28 + 1.55 * storm + 1.25 * chaos, 0.22, 3.1);
     const pCxz = this.tmpV2c.set(this.position.x, this.position.z);
     sampleGerstner(ctx.waves, pCxz, ctx.time_s, ctx.currentXZ, ctx.tideHeight_m, this.tmpWaveSample, this.tmpWaveT, this.tmpWaveB);
     const dxDisp = this.tmpWaveSample.disp.x - this.prevWaveDispXZ.x;
@@ -342,25 +349,32 @@ export class SeaOtter {
     const slope = Math.min(1.2, Math.sqrt(pitch * pitch + roll * roll));
 
     // --- Splash/submerge events ---
-    const hitChance = (slope > 0.22 ? 1 : 0) * (0.10 + 0.55 * storm);
+    const hitChance = clamp((slope - 0.16) / 0.35, 0, 1) * (0.15 + 0.85 * storm);
     if (this.splashCooldown_s <= 0 && this.rng() < hitChance * dt) {
-      this.submerge_m = Math.max(this.submerge_m, lerp(0.12, 0.70, storm));
-      this.splashCooldown_s = lerp(5.0, 1.2, storm);
+      this.submerge_m = Math.max(this.submerge_m, lerp(0.18, 1.05, storm));
+      this.splashCooldown_s = lerp(4.5, 0.9, storm);
     }
 
     // Recover toward surface
-    this.submerge_m = lerp(this.submerge_m, 0, clamp(dt * lerp(0.55, 2.0, 1 - storm), 0, 1));
+    this.submerge_m = lerp(this.submerge_m, 0, clamp(dt * lerp(0.45, 1.6, 1 - storm), 0, 1));
 
     // Vertical placement
-    const targetY = hAvg + this.floatOffset_m - this.submerge_m;
-    const yRate = lerp(6.0, 12.0, storm) * lerp(1.0, 1.25, chaos);
+    const floatOffset = lerp(this.floatOffset_m, -0.14, storm);
+    const targetY = hAvg + floatOffset - this.submerge_m;
+    const yRate = lerp(6.0, 15.0, storm) * lerp(1.0, 1.3, chaos);
     this.position.y = lerp(this.position.y, targetY, clamp(dt * yRate, 0, 1));
 
     // Orientation
+    const stormWobble = storm * (0.10 + 0.12 * chaos);
+    if (stormWobble > 0.001) {
+      const wobbleA = Math.sin(ctx.time_s * (1.6 + 1.1 * chaos) + this.stormPhase) * stormWobble;
+      const wobbleB = Math.cos(ctx.time_s * (2.1 + 1.4 * chaos) + this.stormPhase2) * stormWobble * 0.8;
+      n.addScaledVector(fwd, wobbleA).addScaledVector(right, wobbleB).normalize();
+    }
     const qUp = this.tmpQuatA.setFromUnitVectors(this.up, n);
     const qYaw = this.tmpQuatB.setFromAxisAngle(this.up, this.yaw);
     const qTarget = this.tmpQuatC.copy(qYaw).multiply(qUp);
-    const rRate = lerp(3.0, 8.0, storm) * lerp(1.0, 1.15, chaos);
+    const rRate = lerp(3.0, 10.0, storm) * lerp(1.0, 1.2, chaos);
     this.group.quaternion.slerp(qTarget, clamp(dt * rRate, 0, 1));
     this.group.position.copy(this.position);
 
@@ -372,21 +386,22 @@ export class SeaOtter {
       // Keep underwater looks as an occasional flavor beat.
       // (Too frequent makes the camera stare at featureless water, which can read
       // as random black screens on phones.)
-      const pUnder = uw * lerp(0.02, 0.10, calm);
-      const pSky = lerp(0.10, 0.26, lookA) * lerp(0.55, 0.25, storm);
+      const pUnder = uw * lerp(0.02, 0.10, calm) * (1.0 - storm * 0.6);
+      const pSkyBase = lerp(0.10, 0.26, lookA) * lerp(0.55, 0.25, storm);
+      const pSky = pSkyBase * (1.0 - stormFocus);
       const r = this.rng();
 
       if (r < pUnder) this.lookMode = 'Underwater';
       else if (r < pUnder + pSky) this.lookMode = 'Sky';
       else this.lookMode = 'Horizon';
 
-      const base = lerp(2.8, 7.0, 1 - storm);
+      const base = lerp(2.4, 6.5, 1 - storm);
       const jitter = lerp(0.0, 5.0, lookA) * (this.rng() * 0.6 + 0.4);
       this.lookTimer_s = base + jitter;
 
       // Pick a new gaze offset occasionally (then smooth toward it).
       // This keeps camera aim stable while still feeling "alive".
-      const maxYawOffset = lerp(0.04, 0.42, lookA);
+      const maxYawOffset = lerp(0.04, 0.42, lookA) * lerp(1.0, 0.45, stormFocus);
       this.gazeYawOffsetTarget = (this.rng() * 2 - 1) * maxYawOffset;
     }
 
@@ -396,16 +411,38 @@ export class SeaOtter {
     const gx = Math.cos(yawLook);
     const gz = Math.sin(yawLook);
     const gazeTarget = this.tmpV3c.set(0, 0, 0);
-    if (this.lookMode === 'Horizon') gazeTarget.set(gx, 0.10, gz).normalize();
-    else if (this.lookMode === 'Sky') gazeTarget.set(gx * 0.2, 0.98, gz * 0.2).normalize();
-    else gazeTarget.set(gx * 0.45, -0.62, gz * 0.45).normalize();
+    if (this.lookMode === 'Horizon') {
+      if (stormFocus > 0.001 && typeof inp.windDirTo_rad === 'number') {
+        const waveYaw = inp.windDirTo_rad + Math.PI;
+        const wx = Math.cos(waveYaw);
+        const wz = Math.sin(waveYaw);
+        const mix = lerp(0.0, 0.85, stormFocus);
+        gazeTarget.set(
+          lerp(gx, wx, mix),
+          lerp(0.10, 0.03, mix),
+          lerp(gz, wz, mix)
+        ).normalize();
+      } else {
+        gazeTarget.set(gx, 0.10, gz).normalize();
+      }
+    } else if (this.lookMode === 'Sky') {
+      const interest = inp.interestDir;
+      if (interest && interest.y > 0.08 && stormFocus < 0.15) {
+        gazeTarget.copy(interest).normalize();
+      } else {
+        gazeTarget.set(gx * 0.2, 0.98, gz * 0.2).normalize();
+      }
+    } else {
+      gazeTarget.set(gx * 0.45, -0.62, gz * 0.45).normalize();
+    }
     this.gazeDir.lerp(gazeTarget, clamp(dt * 2.0, 0, 1)).normalize();
 
     // --- Animations ---
     this.updateAnimations(dt, storm, chaos);
+    this.applyStormPose(ctx.time_s, storm, chaos);
 
     // --- Wetness ---
-    const wetTarget = clamp(this.submerge_m * 1.25 + this.paddleImpulse01 * 0.28, 0, 1);
+    const wetTarget = clamp(this.submerge_m * 1.25 + this.paddleImpulse01 * 0.28 + storm * 0.25, 0, 1);
     const wetRate = wetTarget > this.wetness ? 2.5 : 0.25;
     this.wetness = lerp(this.wetness, wetTarget, clamp(dt * wetRate, 0, 1));
     this.wetness01 = this.wetness;
@@ -416,12 +453,12 @@ export class SeaOtter {
     if (!this.mixer) return;
 
     const move01 = clamp(this.speed_mps / 0.18, 0, 1);
-    const paddleBase = clamp(0.12 + 0.85 * (storm * 0.55 + chaos * 0.55), 0, 1);
+    const paddleBase = clamp(0.18 + 0.95 * (storm * 0.65 + chaos * 0.6), 0, 1);
     const paddleW = clamp(paddleBase * (0.25 + 0.75 * move01), 0, 1);
 
     if (this.paddleAction) {
       this.paddleAction.setEffectiveWeight(paddleW);
-      this.paddleAction.setEffectiveTimeScale(lerp(0.55, 1.35, paddleW));
+      this.paddleAction.setEffectiveTimeScale(lerp(0.7, 1.6, paddleW));
     }
 
     const underNow = this.isUnderwaterView();
@@ -448,6 +485,32 @@ export class SeaOtter {
       impulse = clamp((p0 + p1) * 0.85 * paddleW, 0, 1);
     }
     this.paddleImpulse01 = impulse;
+  }
+
+  private applyStormPose(time_s: number, storm: number, chaos: number): void {
+    const head = this.nodes.head;
+    const tail = this.nodes.tail;
+    const flL = this.nodes.flipperL;
+    const flR = this.nodes.flipperR;
+    if (!head && !tail && !flL && !flR) return;
+
+    const brace = clamp(storm * (0.35 + 0.65 * chaos), 0, 1);
+    if (brace <= 0.001) return;
+
+    const nod = Math.sin(time_s * (2.2 + 1.3 * chaos) + this.stormPhase) * 0.12 * brace;
+    const yaw = Math.sin(time_s * (1.7 + 1.1 * chaos) + this.stormPhase2) * 0.10 * brace;
+    const flap = Math.sin(time_s * (3.1 + 1.6 * chaos) + this.stormPhase2) * 0.18 * brace;
+
+    if (head) {
+      head.rotation.x += nod;
+      head.rotation.y += yaw;
+    }
+    if (tail) {
+      tail.rotation.y += flap * 0.6;
+      tail.rotation.z += flap * 0.45;
+    }
+    if (flL) flL.rotation.z += flap * 0.8;
+    if (flR) flR.rotation.z -= flap * 0.8;
   }
 
   private applyWetnessToMaterials(w: number): void {
