@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { clamp, lerp } from './math';
 import { mulberry32 } from './prng';
+import { DROPLET_TEX } from './waterParticleTextures';
 
 export type PrecipMode = 'None' | 'Rain' | 'Snow';
 
@@ -54,6 +55,7 @@ export class PrecipitationSystem {
 
     const mat = new THREE.PointsMaterial({
       color: new THREE.Color('#b8dcff'),
+      map: DROPLET_TEX,
       // Use screen-space sizing so precipitation remains visible on high-DPR phones.
       // (With size attenuation, the drops can become effectively invisible.)
       size: 2.2,
@@ -62,7 +64,8 @@ export class PrecipitationSystem {
       opacity: 0,
       depthWrite: false,
       depthTest: false,
-      blending: THREE.AdditiveBlending
+      blending: THREE.AdditiveBlending,
+      alphaTest: 0.02
     });
     this.points = new THREE.Points(this.geo, mat);
     this.points.frustumCulled = false;
@@ -81,6 +84,11 @@ export class PrecipitationSystem {
 
   public update(u: PrecipUpdate): void {
     const mat = this.points.material as THREE.PointsMaterial;
+    const desiredMap = u.mode === 'Rain' ? DROPLET_TEX : null;
+    if (mat.map !== desiredMap) {
+      mat.map = desiredMap;
+      mat.needsUpdate = true;
+    }
 
     if (!u.visible || u.intensity <= 0.01 || u.mode === 'None') {
       mat.opacity = lerp(mat.opacity, 0.0, clamp(u.dt_s * 2.2, 0, 1));

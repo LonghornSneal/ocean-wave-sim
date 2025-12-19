@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { WaveComponent } from './spectrum';
+import { waveBandWeight, waveHasAnyTag, type WaveComponent } from './spectrum';
 import { clamp, lerp } from './math';
 
 // The ocean shader can run up to 32 Gerstner components, but the foam field only
@@ -26,6 +26,10 @@ export interface FoamFieldUpdateOptions {
   windSpeed_mps: number;
   /** 0..1 */
   storminess: number;
+  /** 0..1 rogue wave boost (optional). */
+  rogueIntensity?: number;
+  /** 0..1 capillary ripple/speckle strength (optional). */
+  capillaryStrength?: number;
 
   /** Optional wake injection (otter). */
   wakePosXZ?: THREE.Vector2;
@@ -62,6 +66,7 @@ export class FoamField {
   private readonly tmpWind = new THREE.Vector2();
   private readonly tmpWakePos = new THREE.Vector2();
   private readonly tmpWakeDir = new THREE.Vector2(0, 1);
+  private readonly foamWaves: WaveComponent[] = [];
 
   constructor(renderer: THREE.WebGLRenderer, opts: FoamFieldOptions) {
     const size = Math.max(64, Math.floor(opts.size));
@@ -120,6 +125,7 @@ export class FoamField {
       u_slopeEnd: { value: 0.52 },
       u_crestStart: { value: 0.18 },
       u_crestEnd: { value: 0.72 },
+      u_capillaryStrength: { value: 0.0 },
 
       // Optional wake injection (otter)
       u_wakePos: { value: new THREE.Vector2(0, 0) },
@@ -166,6 +172,7 @@ export class FoamField {
         uniform float u_slopeEnd;
         uniform float u_crestStart;
         uniform float u_crestEnd;
+        uniform float u_capillaryStrength;
 
         uniform vec2 u_wakePos;
         uniform vec2 u_wakeDir;
@@ -211,15 +218,20 @@ export class FoamField {
 
           for (int i = 0; i < ${MAX_WAVES}; i++) {
             vec2 dir = normalize(u_waveA[i].xy);
-            float A = u_waveA[i].z;
+            float bandInfo = u_waveB[i].w;
+            float foamW = fract(bandInfo);
+            float A = u_waveA[i].z * foamW;
             float k = u_waveA[i].w;
-            float omega = u_waveB[i].x;
+            float omegaRaw = u_waveB[i].x;
             float phase0 = u_waveB[i].y;
 
-            float w = omega + k * dot(dir, u_current);
+            float seiche = step(0.0, -omegaRaw);
+            float omega = abs(omegaRaw);
+
+            float w = omega + k * dot(dir, u_current) * (1.0 - seiche);
             float theta = k * dot(dir, worldXZ) - w * u_time + phase0;
-            float s = sin(theta);
-            float c = cos(theta);
+            float s = mix(sin(theta), cos(theta), seiche);
+            float c = mix(cos(theta), -sin(theta), seiche);
 
             height += A * s;
             dydx += A * k * dir.x * c;
@@ -241,6 +253,16 @@ export class FoamField {
 
           float foam = prev;
           foam += breakMask * u_injectStrength * u_dt;
+          // Capillary speckle: slope + flow act as a cheap glancing proxy.
+          vec2 slopeDir = vec2(dydx, dydz) / max(1e-5, slope);
+          vec2 flowDir = normalize(u_flow + vec2(1e-5, 0.0));
+          float glancing = 1.0 - abs(dot(slopeDir, flowDir));
+          float glancingGate = smoothstep(0.20, 0.85, glancing);
+          float slopeGateSoft = smoothstep(u_slopeStart * 0.50, u_slopeEnd * 0.70, slope);
+          float capNoise = hash12(worldXZ * 0.45 + u_time * 0.60);
+          float capSpeckle = smoothstep(0.62, 0.97, capNoise);
+          float capillary = capSpeckle * slopeGateSoft * glancingGate * clamp(u_capillaryStrength, 0.0, 1.0);
+          foam += capillary * u_injectStrength * u_dt * 0.10;
 
           // --- Wake injection (optional) ---
           if (u_wakeStrength > 0.0001) {
@@ -326,7 +348,10 @@ export class FoamField {
       if (i < N) {
         const w = waves[i];
         uA[i].set(w.dirX, w.dirZ, w.A, w.k);
-        uB[i].set(w.omega, w.phase, w.Q, 0);
+        const swellFlag = waveHasAnyTag(w, ['swell']) ? 1 : 0;
+        const crest = waveBandWeight(w, 'foam');
+        const bandInfo = swellFlag + crest;
+        uB[i].set(w.omega, w.phase, w.Q, bandInfo);
       } else {
         uA[i].set(1, 0, 0, 1);
         uB[i].set(0, 0, 0, 0);
@@ -353,14 +378,21 @@ export class FoamField {
     const storm = clamp(opt.storminess, 0, 1);
     const wind01 = clamp(opt.windSpeed_mps / 18, 0, 1);
 
+    const foamWaves = this.foamWaves;
+    foamWaves.length = 0;
+    for (const w of opt.waves) {
+      if (waveHasAnyTag(w, ['foam'])) foamWaves.push(w);
+    }
+    const wavesForFoam = foamWaves.length > 0 ? foamWaves : opt.waves;
+
     // "Cross sea" heuristic: if wave directions are scattered, collisions and
     // breaking (foam injection) increase, and the foam decays a bit faster.
     // Use energy-weighted mean direction length as a cheap proxy.
     let sx = 0;
     let sy = 0;
     let sw = 0;
-    for (const w of opt.waves) {
-      const weight = w.A * w.A;
+    for (const w of wavesForFoam) {
+      const weight = w.A * w.A * waveBandWeight(w, 'foam');
       sx += w.dirX * weight;
       sy += w.dirZ * weight;
       sw += weight;
@@ -375,6 +407,17 @@ export class FoamField {
     this.uniforms.u_slopeEnd.value = this.uniforms.u_slopeStart.value + lerp(0.20, 0.30, wind01);
     this.uniforms.u_crestStart.value = lerp(0.15, 0.08, wind01);
     this.uniforms.u_crestEnd.value = lerp(0.70, 0.52, wind01);
+    this.uniforms.u_capillaryStrength.value = clamp(opt.capillaryStrength ?? 0.0, 0.0, 1.0);
+
+    const rogue = clamp(opt.rogueIntensity ?? 0, 0, 1);
+    if (rogue > 1e-4) {
+      this.uniforms.u_injectStrength.value *= 1.0 + 1.15 * rogue;
+      this.uniforms.u_decay.value *= 1.0 - 0.35 * rogue;
+      this.uniforms.u_slopeStart.value = Math.max(0.0, this.uniforms.u_slopeStart.value - 0.06 * rogue);
+      this.uniforms.u_slopeEnd.value = Math.max(this.uniforms.u_slopeStart.value + 0.12, this.uniforms.u_slopeEnd.value - 0.05 * rogue);
+      this.uniforms.u_crestStart.value = Math.max(0.0, this.uniforms.u_crestStart.value - 0.04 * rogue);
+      this.uniforms.u_crestEnd.value = Math.max(this.uniforms.u_crestStart.value + 0.10, this.uniforms.u_crestEnd.value - 0.06 * rogue);
+    }
 
     // Optional wake.
     const wakeStrength = clamp(opt.wakeStrength ?? 0, 0, 1.5);
@@ -399,7 +442,7 @@ export class FoamField {
     this.uniforms.u_current.value.copy(opt.currentXZ);
 
     // Wave arrays.
-    this.writeWaves(opt.waves);
+    this.writeWaves(wavesForFoam);
 
     // Ping-pong.
     const src = this.pingIsA ? this.rtA : this.rtB;

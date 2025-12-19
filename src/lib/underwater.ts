@@ -24,6 +24,7 @@ export const UnderwaterShader = {
     u_cameraFar: { value: 1000.0 },
     u_invProj: { value: new THREE.Matrix4() },
     u_invView: { value: new THREE.Matrix4() },
+    u_cameraWorldY: { value: 0.0 },
 
     /** Sun in screen UV (0..1). */
     u_sunUv: { value: new THREE.Vector2(0.5, 0.5) },
@@ -63,6 +64,7 @@ export const UnderwaterShader = {
     uniform float u_cameraFar;
     uniform mat4 u_invProj;
     uniform mat4 u_invView;
+    uniform float u_cameraWorldY;
 
     uniform vec2 u_sunUv;
     uniform float u_sunInView;
@@ -123,7 +125,9 @@ export const UnderwaterShader = {
       float clarity = saturate(u_clarity);
 
       // Approx depth below the surface (meters). Only meaningful when we have worldPos.
-      float depthBelow = hasDepth > 0.5 ? max(0.0, u_waterLevel - worldPos.y) : 0.0;
+      float depthBelow = hasDepth > 0.5
+        ? max(0.0, u_waterLevel - worldPos.y)
+        : max(0.0, u_waterLevel - u_cameraWorldY);
 
       // --- Subtle refraction shimmer near the surface ---
       float surfaceProx = exp(-depthBelow * mix(0.35, 0.14, clarity));

@@ -13,6 +13,11 @@ export function applyOceanMaterialShader(
   shader.uniforms.u_tideHeight = uniforms.u_tideHeight;
   shader.uniforms.u_waveA = uniforms.u_waveA;
   shader.uniforms.u_waveB = uniforms.u_waveB;
+  shader.uniforms.u_swellIntensity = uniforms.u_swellIntensity;
+  shader.uniforms.u_pulseA = uniforms.u_pulseA;
+  shader.uniforms.u_pulseB = uniforms.u_pulseB;
+  shader.uniforms.u_pulseC = uniforms.u_pulseC;
+  shader.uniforms.u_pulseOrigin = uniforms.u_pulseOrigin;
   shader.uniforms.u_foamIntensity = uniforms.u_foamIntensity;
   shader.uniforms.u_foamSlopeStart = uniforms.u_foamSlopeStart;
   shader.uniforms.u_foamSlopeEnd = uniforms.u_foamSlopeEnd;
@@ -42,6 +47,8 @@ export function applyOceanMaterialShader(
   shader.uniforms.u_microStrength = uniforms.u_microStrength;
   shader.uniforms.u_microFadeNear = uniforms.u_microFadeNear;
   shader.uniforms.u_microFadeFar = uniforms.u_microFadeFar;
+  shader.uniforms.u_capillaryStrength = uniforms.u_capillaryStrength;
+  shader.uniforms.u_hasCapillary = uniforms.u_hasCapillary;
 
   // Add varyings
   shader.vertexShader = shader.vertexShader.replace(
@@ -61,6 +68,11 @@ export function applyOceanMaterialShader(
         uniform mat4 u_reflectionMatrix;
         uniform vec4 u_waveA[${maxWaves}];
         uniform vec4 u_waveB[${maxWaves}];
+        uniform float u_swellIntensity;
+        uniform vec4 u_pulseA;
+        uniform vec4 u_pulseB;
+        uniform vec4 u_pulseC;
+        uniform vec2 u_pulseOrigin;
         uniform float u_foamSlopeStart;
         uniform float u_foamSlopeEnd;`
   );
@@ -80,34 +92,109 @@ export function applyOceanMaterialShader(
         float dzdz = 0.0;
         float dydx = 0.0;
         float dydz = 0.0;
+        float fHeight = 0.0;
+        float fdxdx = 0.0;
+        float fdxdz = 0.0;
+        float fdzdx = 0.0;
+        float fdzdz = 0.0;
+        float fdydx = 0.0;
+        float fdydz = 0.0;
 
         for (int i = 0; i < ${maxWaves}; i++) {
           vec2 dir = normalize(u_waveA[i].xy);
           float A = u_waveA[i].z;
           float k = u_waveA[i].w;
-          float omega = u_waveB[i].x;
+          float omegaRaw = u_waveB[i].x;
           float phase0 = u_waveB[i].y;
           float Q = u_waveB[i].z;
+          float bandInfo = u_waveB[i].w;
+          float swellTag = step(1.0, bandInfo);
+          float crestSharp = fract(bandInfo);
 
-          float w = omega + k * dot(dir, u_current);
+          float seiche = step(0.0, -omegaRaw);
+          float omega = abs(omegaRaw);
+
+          float w = omega + k * dot(dir, u_current) * (1.0 - seiche);
           float theta = k * dot(dir, worldXZ) - w * u_time + phase0;
 
-          float s = sin(theta);
-          float c = cos(theta);
+          float s = mix(sin(theta), cos(theta), seiche);
+          float c = mix(cos(theta), -sin(theta), seiche);
+          float Qeff = Q * (1.0 - seiche);
 
-          disp.y += A * s;
-          disp.xz += dir * (Q * A * c);
+          float swellScale = mix(1.0, u_swellIntensity, swellTag);
+          float A_disp = A * swellScale;
 
-          float WAk = Q * A * k;
+          disp.y += A_disp * s;
+          disp.xz += dir * (Qeff * A_disp * c);
+
+          float WAk = Qeff * A_disp * k;
 
           dxdx += -dir.x * dir.x * WAk * s;
           dxdz += -dir.x * dir.y * WAk * s;
           dzdx += -dir.y * dir.x * WAk * s;
           dzdz += -dir.y * dir.y * WAk * s;
 
-          dydx += A * k * dir.x * c;
-          dydz += A * k * dir.y * c;
+          dydx += A_disp * k * dir.x * c;
+          dydz += A_disp * k * dir.y * c;
+
+          float A_foam = A * crestSharp;
+          float WAkF = Qeff * A_foam * k;
+
+          fHeight += A_foam * s;
+
+          fdxdx += -dir.x * dir.x * WAkF * s;
+          fdxdz += -dir.x * dir.y * WAkF * s;
+          fdzdx += -dir.y * dir.x * WAkF * s;
+          fdzdz += -dir.y * dir.y * WAkF * s;
+
+          fdydx += A_foam * k * dir.x * c;
+          fdydz += A_foam * k * dir.y * c;
         }
+
+        // --- Seismic pulse (long wave packet) ---
+        vec2 pDir = u_pulseA.xy;
+        float pDirLen = length(pDir);
+        pDir = pDirLen > 1e-6 ? (pDir / pDirLen) : vec2(1.0, 0.0);
+
+        float pulseA = u_pulseA.z;
+        float pulseK = u_pulseA.w;
+        float pulseOmega = u_pulseB.x;
+        float pulsePhase = u_pulseB.y;
+        float pulseQ = u_pulseB.z;
+        float pulseGroup = u_pulseB.w;
+        float pulseDecay = max(1e-3, u_pulseC.x);
+        float pulseDur = max(u_pulseC.z, 0.0);
+        float tPulse = u_time - u_pulseC.y;
+        float fade = min(2.5, pulseDur * 0.2);
+        fade = min(fade, pulseDur * 0.5);
+        fade = max(fade, 1e-4);
+        float pulseGate = smoothstep(0.0, fade, tPulse) * (1.0 - smoothstep(pulseDur - fade, pulseDur, tPulse));
+        pulseGate *= step(1e-4, pulseDur);
+
+        vec2 pOffset = worldXZ - u_pulseOrigin;
+        float sPulse = dot(pDir, pOffset);
+        float dist = sPulse - pulseGroup * tPulse;
+        float env = exp(-(dist * dist) / (pulseDecay * pulseDecay));
+        float A_p = pulseA * env * pulseGate;
+
+        float wPulse = pulseOmega + pulseK * dot(pDir, u_current);
+        float thetaPulse = pulseK * sPulse - wPulse * tPulse + pulsePhase;
+
+        float sp = sin(thetaPulse);
+        float cp = cos(thetaPulse);
+
+        disp.y += A_p * sp;
+        disp.xz += pDir * (pulseQ * A_p * cp);
+
+        float WAkP = pulseQ * A_p * pulseK;
+
+        dxdx += -pDir.x * pDir.x * WAkP * sp;
+        dxdz += -pDir.x * pDir.y * WAkP * sp;
+        dzdx += -pDir.y * pDir.x * WAkP * sp;
+        dzdz += -pDir.y * pDir.y * WAkP * sp;
+
+        dydx += A_p * pulseK * pDir.x * cp;
+        dydz += A_p * pulseK * pDir.y * cp;
 
         transformed.xyz += disp;
         transformed.y += u_tideHeight;
@@ -127,9 +214,13 @@ export function applyOceanMaterialShader(
         // World -> reflection UV projection (planar reflection RT)
         vReflProj = u_reflectionMatrix * vec4(vWorldPos, 1.0);
 
-        float slope = 1.0 - n.y;
+        vec3 Tf = vec3(1.0 + fdxdx, fdydx, fdzdx);
+        vec3 Bf = vec3(fdxdz, fdydz, 1.0 + fdzdz);
+        vec3 nFoam = normalize(cross(Bf, Tf));
+
+        float slope = 1.0 - nFoam.y;
         float foamSlope = smoothstep(u_foamSlopeStart, u_foamSlopeEnd, slope);
-        float foamCrest = smoothstep(0.0, 0.25, disp.y);
+        float foamCrest = smoothstep(0.0, 0.25, fHeight);
         vFoam = foamSlope * foamCrest;`
   );
 
@@ -165,9 +256,12 @@ export function applyOceanMaterialShader(
         uniform float u_microStrength;
         uniform float u_microFadeNear;
         uniform float u_microFadeFar;
+        uniform float u_capillaryStrength;
+        uniform float u_hasCapillary;
 
         // World normal after micro-normal perturbation (written in normal pass).
         vec3 gWorldNormal;
+        float gCapillarySpeckle;
 
         uniform vec3 u_sunDir;
         uniform vec3 u_sunColor;
@@ -200,7 +294,19 @@ export function applyOceanMaterialShader(
 
         vec3 n1 = texture2D(u_microNormal1, uv1).xyz * 2.0 - 1.0;
         vec3 n2 = texture2D(u_microNormal2, uv2).xyz * 2.0 - 1.0;
-        vec3 nTS = normalize(mix(n1, n2, 0.55));
+
+        float capillaryPresent = clamp(u_hasCapillary, 0.0, 1.0);
+        vec3 n2Cap = mix(n1, n2, capillaryPresent);
+
+        vec3 Vw = normalize(cameraPosition - vWorldPos);
+        float ndvMacro = clamp(dot(NmacroW, Vw), 0.0, 1.0);
+        float glancing = smoothstep(0.20, 0.85, 1.0 - ndvMacro);
+
+        float capBoost = clamp(u_capillaryStrength, 0.0, 1.0) * glancing * capillaryPresent;
+        float baseMix = 0.55;
+        float capMix = clamp(baseMix + (1.0 - baseMix) * capBoost, 0.0, 1.0);
+
+        vec3 nTS = normalize(mix(n1, n2Cap, capMix));
 
         // Basis around macro normal (world space).
         vec3 up = vec3(0.0, 1.0, 0.0);
@@ -214,6 +320,8 @@ export function applyOceanMaterialShader(
         // Fade micro detail with distance to prevent shimmering.
         float distXZ = length(cameraPosition.xz - vWorldPos.xz);
         float microFade = 1.0 - smoothstep(u_microFadeNear, u_microFadeFar, distXZ);
+        float capSpeckle = smoothstep(0.12, 0.45, length(n2Cap.xy));
+        gCapillarySpeckle = capSpeckle * capillaryPresent * microFade;
         float microAmt = clamp(u_microStrength, 0.0, 1.0) * microFade;
 
         // Wave slope-foam dampens micro facets (helps keep sunset highlight stable).
@@ -239,6 +347,15 @@ export function applyOceanMaterialShader(
         foamPersist = pow(clamp(foamPersist, 0.0, 1.0), 1.15);
 
         float foam = clamp((foamInstant * 0.55 + foamPersist * 1.10) * u_foamIntensity, 0.0, 1.0);
+        float capillaryGate = clamp(u_capillaryStrength, 0.0, 1.0) * clamp(u_hasCapillary, 0.0, 1.0);
+        vec3 NmacroFoam = normalize(vWorldNormal);
+        vec3 Vfoam = normalize(cameraPosition - vWorldPos);
+        float ndvFoam = clamp(dot(NmacroFoam, Vfoam), 0.0, 1.0);
+        float glancingFoam = smoothstep(0.20, 0.85, 1.0 - ndvFoam);
+        float slopeFoam = 1.0 - NmacroFoam.y;
+        float slopeGate = smoothstep(0.03, 0.18, slopeFoam);
+        float foamSpeckle = gCapillarySpeckle * glancingFoam * slopeGate * capillaryGate;
+        foam = clamp(foam + foamSpeckle * 0.35 * (1.0 - foam), 0.0, 1.0);
 
         // --- Water transmission tint (cheap absorption) ---
         float viewDist = length(vViewPosition);

@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { FoamField } from './lib/foamField';
 import type { WaveComponent } from './lib/spectrum';
-import { clamp } from './lib/math';
+import { clamp, degToRad } from './lib/math';
+import { OverlayWarning } from './lib/overlay';
 import {
   applyPersistedParams,
   createGUI,
@@ -16,6 +17,7 @@ import { SeaOtter } from './lib/otter';
 import { OtterCameraRig } from './lib/otterCamera';
 import { PrecipitationSystem } from './lib/precip';
 import { PerfOverlay } from './lib/perfOverlay';
+import { RogueWaveScheduler, buildSeismicPulse, type SeismicPulseState } from './lib/wavePhysics';
 import { applyCanvasSize } from './app/quality';
 import { installRuntimeErrorOverlay } from './app/runtimeOverlay';
 import { AudioController } from './app/audioController';
@@ -167,6 +169,8 @@ const camRig = new OtterCameraRig();
 // ---------- Weather + life ----------
 
 const weatherSim = new WeatherSim();
+const rogueScheduler = new RogueWaveScheduler();
+const rogueWarning = new OverlayWarning('Rogue Wave');
 
 let simTime_s = 0;
 let timeOfDay_h = params.timeOfDay_h;
@@ -178,6 +182,32 @@ let seaTp_s = 7.5;
 let windDirTo_rad = Math.PI;
 // A slower-moving "memory" direction used for the swell band (milestone #3).
 let swellDirTo_rad = Math.PI;
+
+const seismicPulse: SeismicPulseState = {
+  component: buildSeismicPulse({
+    amplitude_m: params.pulseAmplitude_m,
+    wavelength_m: params.pulseWavelength_m,
+    depth_m: params.depth_m,
+    directionTo_rad: degToRad(params.pulseDirection_deg),
+    decayLength_m: params.pulseDecayLength_m,
+    groupSpeedScale: params.pulseSpeedScale
+  }),
+  originXZ: new THREE.Vector2(0, 0),
+  startTime_s: -1e9,
+  duration_s: params.pulseDuration_s
+};
+
+function updateSeismicPulse(): void {
+  seismicPulse.component = buildSeismicPulse({
+    amplitude_m: params.pulseAmplitude_m,
+    wavelength_m: params.pulseWavelength_m,
+    depth_m: params.depth_m,
+    directionTo_rad: degToRad(params.pulseDirection_deg),
+    decayLength_m: params.pulseDecayLength_m,
+    groupSpeedScale: params.pulseSpeedScale
+  });
+  seismicPulse.duration_s = params.pulseDuration_s;
+}
 
 const worldAssets = createWorldAssets(scene, params);
 const { life, cloudLayers, lightningBolts, lightningDir, islands, rainbow, splashes, windSpray, ripples, wakeRibbon } = worldAssets;
@@ -223,6 +253,18 @@ function resetSimulation(): void {
     foamField,
     otterPrevXZ
   }));
+  const rogueSeed = Math.floor((params.latitude_deg * 1000 + params.longitude_deg * 1000 + dayOfYear * 17 + timeOfDay_h * 13) % 2147483647);
+  rogueScheduler.reset(rogueSeed);
+  rogueWarning.setIntensity(0);
+  updateSeismicPulse();
+  seismicPulse.startTime_s = -1e9;
+  seismicPulse.originXZ.set(otter.position.x, otter.position.z);
+}
+
+function triggerSeismicPulse(): void {
+  updateSeismicPulse();
+  seismicPulse.startTime_s = simTime_s;
+  seismicPulse.originXZ.set(otter.position.x, otter.position.z);
 }
 
 function applyQualityIfChanged(): void {
@@ -283,6 +325,7 @@ gui = createGUI(params, {
     // Allow time/location edits at any point.
     timeOfDay_h = params.timeOfDay_h;
     dayOfYear = params.dayOfYear;
+    updateSeismicPulse();
     applyQualityIfChanged();
     applyOtterAppearance();
     audioController.updateHint();
@@ -317,6 +360,7 @@ gui = createGUI(params, {
 
     timeOfDay_h = params.timeOfDay_h;
     dayOfYear = params.dayOfYear;
+    updateSeismicPulse();
 
     applyQualityIfChanged();
     applyOtterAppearance();
@@ -326,6 +370,9 @@ gui = createGUI(params, {
     resetSimulation();
     savePersistedParams(params);
     refreshGui();
+  },
+  onPulseTrigger: () => {
+    triggerSeismicPulse();
   }
 });
 
@@ -400,6 +447,7 @@ window.addEventListener('beforeunload', () => {
   ripples.dispose();
   wakeRibbon.dispose();
   audioController.dispose();
+  rogueWarning.dispose();
   perfOverlay.dispose();
   precip.dispose();
   splashes.dispose();
@@ -480,6 +528,9 @@ const loopState: LoopState = {
   set windDirTo_rad(v) { windDirTo_rad = v; },
   get swellDirTo_rad() { return swellDirTo_rad; },
   set swellDirTo_rad(v) { swellDirTo_rad = v; },
+  seismicPulse,
+  rogueScheduler,
+  rogueWarning,
   otterPrevXZ,
   get otterSpeed_mps() { return otterSpeed_mps; },
   set otterSpeed_mps(v) { otterSpeed_mps = v; }

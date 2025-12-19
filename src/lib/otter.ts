@@ -3,7 +3,8 @@ import { GLTFLoader, type GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { clamp, lerp } from './math';
 import { mulberry32 } from './prng';
 import type { WaveComponent } from './spectrum';
-import { sampleGerstner } from './waveSample';
+import { sampleGerstner, type WaveSampleOptions } from './waveSample';
+import type { RogueWaveState, SeismicPulseState } from './wavePhysics';
 import { applyOtterStormPose, setupOtterAnimations, updateOtterAnimations } from './otter/animations';
 import { updateOtterGaze } from './otter/gaze';
 import { applyOtterWetness, type WetMaterialEntry } from './otter/materials';
@@ -13,6 +14,8 @@ import { showOtterLoadError } from './otter/utils';
 import type { RigNodes } from './otter/types';
 
 THREE.Cache.enabled = true;
+
+const EVENT_WAVE_SAMPLE: WaveSampleOptions = { includeTags: ['event'], applyCrestSharpness: true };
 
 export interface OtterInputs {
   /** 0..1. Higher = more gaze changes, more random exploration. */
@@ -32,6 +35,10 @@ export interface OtterUpdateContext {
   waves: WaveComponent[];
   currentXZ: THREE.Vector2;
   tideHeight_m: number;
+  rogue?: RogueWaveState;
+  pulse?: SeismicPulseState | null;
+  /** 0..1; lower values damp wake/splash foam when pulse is active. */
+  pulseFoamDamp?: number;
 }
 
 export type OtterLookMode = 'Horizon' | 'Sky' | 'Underwater';
@@ -265,7 +272,7 @@ export class SeaOtter {
     // permanent bias.
     const carry = clamp(0.28 + 1.55 * storm + 1.25 * chaos, 0.22, 3.1);
     const pCxz = this.tmpV2c.set(this.position.x, this.position.z);
-    sampleGerstner(ctx.waves, pCxz, ctx.time_s, ctx.currentXZ, ctx.tideHeight_m, this.tmpWaveSample, this.tmpWaveT, this.tmpWaveB);
+    sampleGerstner(ctx.waves, pCxz, ctx.time_s, ctx.currentXZ, ctx.tideHeight_m, this.tmpWaveSample, this.tmpWaveT, this.tmpWaveB, ctx.rogue, ctx.pulse);
     const dxDisp = this.tmpWaveSample.disp.x - this.prevWaveDispXZ.x;
     const dzDisp = this.tmpWaveSample.disp.z - this.prevWaveDispXZ.y;
     if (this.waveDispInit) {
@@ -295,13 +302,13 @@ export class SeaOtter {
 
     const pFxz = this.tmpV2a.set(this.position.x + fwd.x * this.buoySampleFwd_m, this.position.z + fwd.z * this.buoySampleFwd_m);
     const pBxz = this.tmpV2b.set(this.position.x - fwd.x * this.buoySampleFwd_m, this.position.z - fwd.z * this.buoySampleFwd_m);
-    const hF = sampleGerstner(ctx.waves, pFxz, ctx.time_s, ctx.currentXZ, ctx.tideHeight_m, this.tmpWaveSample, this.tmpWaveT, this.tmpWaveB).height_m;
-    const hB = sampleGerstner(ctx.waves, pBxz, ctx.time_s, ctx.currentXZ, ctx.tideHeight_m, this.tmpWaveSample, this.tmpWaveT, this.tmpWaveB).height_m;
+    const hF = sampleGerstner(ctx.waves, pFxz, ctx.time_s, ctx.currentXZ, ctx.tideHeight_m, this.tmpWaveSample, this.tmpWaveT, this.tmpWaveB, ctx.rogue, ctx.pulse).height_m;
+    const hB = sampleGerstner(ctx.waves, pBxz, ctx.time_s, ctx.currentXZ, ctx.tideHeight_m, this.tmpWaveSample, this.tmpWaveT, this.tmpWaveB, ctx.rogue, ctx.pulse).height_m;
 
     const pLxz = this.tmpV2c.set(this.position.x - right.x * this.buoySampleSide_m, this.position.z - right.z * this.buoySampleSide_m);
     const pRxz = this.tmpV2d.set(this.position.x + right.x * this.buoySampleSide_m, this.position.z + right.z * this.buoySampleSide_m);
-    const hL = sampleGerstner(ctx.waves, pLxz, ctx.time_s, ctx.currentXZ, ctx.tideHeight_m, this.tmpWaveSample, this.tmpWaveT, this.tmpWaveB).height_m;
-    const hR = sampleGerstner(ctx.waves, pRxz, ctx.time_s, ctx.currentXZ, ctx.tideHeight_m, this.tmpWaveSample, this.tmpWaveT, this.tmpWaveB).height_m;
+    const hL = sampleGerstner(ctx.waves, pLxz, ctx.time_s, ctx.currentXZ, ctx.tideHeight_m, this.tmpWaveSample, this.tmpWaveT, this.tmpWaveB, ctx.rogue, ctx.pulse).height_m;
+    const hR = sampleGerstner(ctx.waves, pRxz, ctx.time_s, ctx.currentXZ, ctx.tideHeight_m, this.tmpWaveSample, this.tmpWaveT, this.tmpWaveB, ctx.rogue, ctx.pulse).height_m;
 
     const hAvg = (hF + hB + hL + hR) * 0.25;
 
@@ -314,10 +321,17 @@ export class SeaOtter {
       .addScaledVector(right, -roll)
       .normalize();
 
-    const slope = Math.min(1.2, Math.sqrt(pitch * pitch + roll * roll));
+    const hFEvent = sampleGerstner(ctx.waves, pFxz, ctx.time_s, ctx.currentXZ, ctx.tideHeight_m, this.tmpWaveSample, this.tmpWaveT, this.tmpWaveB, ctx.rogue, ctx.pulse, EVENT_WAVE_SAMPLE).height_m;
+    const hBEvent = sampleGerstner(ctx.waves, pBxz, ctx.time_s, ctx.currentXZ, ctx.tideHeight_m, this.tmpWaveSample, this.tmpWaveT, this.tmpWaveB, ctx.rogue, ctx.pulse, EVENT_WAVE_SAMPLE).height_m;
+    const hLEvent = sampleGerstner(ctx.waves, pLxz, ctx.time_s, ctx.currentXZ, ctx.tideHeight_m, this.tmpWaveSample, this.tmpWaveT, this.tmpWaveB, ctx.rogue, ctx.pulse, EVENT_WAVE_SAMPLE).height_m;
+    const hREvent = sampleGerstner(ctx.waves, pRxz, ctx.time_s, ctx.currentXZ, ctx.tideHeight_m, this.tmpWaveSample, this.tmpWaveT, this.tmpWaveB, ctx.rogue, ctx.pulse, EVENT_WAVE_SAMPLE).height_m;
+
+    const pitchEvent = (hFEvent - hBEvent) / Math.max(1e-4, 2.0 * this.buoySampleFwd_m);
+    const rollEvent = (hREvent - hLEvent) / Math.max(1e-4, 2.0 * this.buoySampleSide_m);
+    const slopeEvent = Math.min(1.2, Math.sqrt(pitchEvent * pitchEvent + rollEvent * rollEvent));
 
     // --- Splash/submerge events ---
-    const hitChance = clamp((slope - 0.16) / 0.35, 0, 1) * (0.15 + 0.85 * storm);
+    const hitChance = clamp((slopeEvent - 0.16) / 0.35, 0, 1) * (0.15 + 0.85 * storm);
     if (this.splashCooldown_s <= 0 && this.rng() < hitChance * dt) {
       this.submerge_m = Math.max(this.submerge_m, lerp(0.18, 1.05, storm));
       this.splashCooldown_s = lerp(4.5, 0.9, storm);
@@ -369,6 +383,8 @@ export class SeaOtter {
 
     // --- Animations ---
     this.updateAnimations(dt, storm, chaos);
+    const pulseFoamDamp = clamp(ctx.pulseFoamDamp ?? 1.0, 0.0, 1.0);
+    this.paddleImpulse01 *= pulseFoamDamp;
     this.applyStormPose(ctx.time_s, storm, chaos);
 
     // --- Wetness ---

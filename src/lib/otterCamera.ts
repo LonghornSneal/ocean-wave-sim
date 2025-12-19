@@ -10,6 +10,8 @@ export interface OtterCameraInputs {
   headPos: THREE.Vector3;
   eyePos: THREE.Vector3;
   surfaceHeight_m: number;
+  /** Mean sea level (tide offset). */
+  seaLevel_m: number;
   underwater: boolean;
   storminess: number; // 0..1
 
@@ -35,6 +37,7 @@ export class OtterCameraRig {
 
   // Smoothed waterline (prevents the camera from bobbing violently with every wave).
   private waterY_m = 0;
+  private waveOffset_m = 0;
 
   private initialized = false;
 
@@ -78,12 +81,16 @@ export class OtterCameraRig {
 
     // Smooth the waterline we clamp against so the camera doesn't "buzz" when
     // sampling a detailed wave field.
+    const seaLevel = inp.seaLevel_m;
+    const waveOffset = inp.surfaceHeight_m - seaLevel;
     if (!this.initialized) {
       this.waterY_m = inp.surfaceHeight_m;
+      this.waveOffset_m = waveOffset;
     } else {
       const tauWater = lerp(0.35, 0.55, storm);
       const kWater = 1 - Math.exp(-dt / Math.max(1e-3, tauWater));
-      this.waterY_m = lerp(this.waterY_m, inp.surfaceHeight_m, kWater);
+      this.waveOffset_m = lerp(this.waveOffset_m, waveOffset, kWater);
+      this.waterY_m = seaLevel + this.waveOffset_m;
     }
 
     // Keep camera just above the (smoothed) waterline.

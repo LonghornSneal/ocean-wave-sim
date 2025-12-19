@@ -29,6 +29,7 @@ export function createOceanSurface(renderer: THREE.WebGLRenderer, scene: THREE.S
     foamIntensity: 1.1,
     foamSlopeStart: 0.18,
     foamSlopeEnd: 0.62,
+    capillaryStrength: params.capillaryStrength,
     waves: []
   });
 

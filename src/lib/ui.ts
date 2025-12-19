@@ -164,6 +164,39 @@ export interface AppParams {
   // Water
   clarity_pct: number;                 // 0..100
 
+  // Tide
+  tideAmplitude_m: number;
+  tidePeriod_h: number;
+  tidePhase_deg: number;
+
+  // Seiche (standing basin wave)
+  seicheEnabled: boolean;
+  seicheAmplitude_m: number;
+  seichePeriod_s: number;
+  windSeaIntensity: number;            // 0..2
+  swellIntensity: number;              // 0..2
+  capillaryStrength: number;           // 0..1
+  capillaryAmplitude_m: number;        // 0..0.02
+  capillarySlopeFalloff: number;       // 0.25..3
+  capillaryDirectionalSpread: number;  // 0..1
+  capillaryWaveCount: number;          // 0..16
+
+  // Rogue waves (rare events)
+  rogueEnabled: boolean;
+  rogueChance_pct: number;             // 0..100 (per minute)
+  rogueDuration_s: number;             // 2..40
+  rogueComponentCount: number;         // 1..10
+  rogueAmplitudeBoost: number;         // 0..250 (%)
+  roguePhaseAlign_pct: number;         // 0..100
+
+  // Seismic pulse (long wave packet)
+  pulseAmplitude_m: number;
+  pulseWavelength_m: number;
+  pulseDecayLength_m: number;
+  pulseDuration_s: number;
+  pulseSpeedScale: number;
+  pulseDirection_deg: number;
+
   // Performance
   quality: QualityMode;
   qualityInfo: string;
@@ -200,6 +233,9 @@ export function defaultParams(): AppParams {
   // Default to a dramatic "superstorm" scenario (you can always dial this back).
   const q: QualityMode = defaultQualityForDevice();
   const reduceFlashes = prefersReducedMotion();
+  const capillaryWaveCount = q === 'Low' ? 3 : (q === 'Medium' ? 5 : (q === 'High' ? 6 : 7));
+  const capillaryAmplitude_m = q === 'Low' ? 0.0025 : (q === 'Medium' ? 0.003 : (q === 'High' ? 0.0035 : 0.004));
+  const capillaryStrength = q === 'Low' ? 0.2 : (q === 'Medium' ? 0.25 : (q === 'High' ? 0.3 : 0.35));
   return {
     gameStarted: false,
 
@@ -233,6 +269,33 @@ export function defaultParams(): AppParams {
     cameraElevation_m: 1.05,
 
     clarity_pct: 55,
+
+    tideAmplitude_m: 1.0,
+    tidePeriod_h: 12.42,
+    tidePhase_deg: 0,
+
+    seicheEnabled: false,
+    seicheAmplitude_m: 0.45,
+    seichePeriod_s: 180,
+    windSeaIntensity: 1.0,
+    swellIntensity: 1.0,
+    capillaryStrength,
+    capillaryAmplitude_m,
+    capillarySlopeFalloff: 1.2,
+    capillaryDirectionalSpread: 0.2,
+    capillaryWaveCount,
+    rogueEnabled: false,
+    rogueChance_pct: 6,
+    rogueDuration_s: 8,
+    rogueComponentCount: 3,
+    rogueAmplitudeBoost: 80,
+    roguePhaseAlign_pct: 55,
+    pulseAmplitude_m: 1.8,
+    pulseWavelength_m: 320,
+    pulseDecayLength_m: 420,
+    pulseDuration_s: 16,
+    pulseSpeedScale: 1.35,
+    pulseDirection_deg: 225,
 
     quality: q,
     qualityInfo: qualityInfo(q),
@@ -282,6 +345,31 @@ type PersistedParams = Pick<
   | 'cameraDistance_m'
   | 'cameraElevation_m'
   | 'clarity_pct'
+  | 'tideAmplitude_m'
+  | 'tidePeriod_h'
+  | 'tidePhase_deg'
+  | 'seicheEnabled'
+  | 'seicheAmplitude_m'
+  | 'seichePeriod_s'
+  | 'windSeaIntensity'
+  | 'swellIntensity'
+  | 'capillaryStrength'
+  | 'capillaryAmplitude_m'
+  | 'capillarySlopeFalloff'
+  | 'capillaryDirectionalSpread'
+  | 'capillaryWaveCount'
+  | 'rogueEnabled'
+  | 'rogueChance_pct'
+  | 'rogueDuration_s'
+  | 'rogueComponentCount'
+  | 'rogueAmplitudeBoost'
+  | 'roguePhaseAlign_pct'
+  | 'pulseAmplitude_m'
+  | 'pulseWavelength_m'
+  | 'pulseDecayLength_m'
+  | 'pulseDuration_s'
+  | 'pulseSpeedScale'
+  | 'pulseDirection_deg'
   | 'quality'
   | 'perfOverlay'
   | 'reduceFlashes'
@@ -351,6 +439,77 @@ export function applyPersistedParams(params: AppParams): void {
   if (typeof data.cameraDistance_m === 'number' && Number.isFinite(data.cameraDistance_m)) params.cameraDistance_m = clamp(data.cameraDistance_m, 9.0, 18.0);
   if (typeof data.cameraElevation_m === 'number' && Number.isFinite(data.cameraElevation_m)) params.cameraElevation_m = clamp(data.cameraElevation_m, 0.35, 3.0);
   if (typeof data.clarity_pct === 'number' && Number.isFinite(data.clarity_pct)) params.clarity_pct = clamp(data.clarity_pct, 0, 100);
+  if (typeof data.tideAmplitude_m === 'number' && Number.isFinite(data.tideAmplitude_m)) {
+    params.tideAmplitude_m = clamp(data.tideAmplitude_m, 0, 3);
+  }
+  if (typeof data.tidePeriod_h === 'number' && Number.isFinite(data.tidePeriod_h)) {
+    params.tidePeriod_h = clamp(data.tidePeriod_h, 4, 30);
+  }
+  if (typeof data.tidePhase_deg === 'number' && Number.isFinite(data.tidePhase_deg)) {
+    params.tidePhase_deg = clamp(data.tidePhase_deg, 0, 360);
+  }
+  if (typeof data.seicheEnabled === 'boolean') params.seicheEnabled = data.seicheEnabled;
+  if (typeof data.seicheAmplitude_m === 'number' && Number.isFinite(data.seicheAmplitude_m)) {
+    params.seicheAmplitude_m = clamp(data.seicheAmplitude_m, 0, 3);
+  }
+  if (typeof data.seichePeriod_s === 'number' && Number.isFinite(data.seichePeriod_s)) {
+    params.seichePeriod_s = clamp(data.seichePeriod_s, 30, 600);
+  }
+  if (typeof data.windSeaIntensity === 'number' && Number.isFinite(data.windSeaIntensity)) {
+    params.windSeaIntensity = clamp(data.windSeaIntensity, 0, 2);
+  }
+  if (typeof data.swellIntensity === 'number' && Number.isFinite(data.swellIntensity)) {
+    params.swellIntensity = clamp(data.swellIntensity, 0, 2);
+  }
+  if (typeof data.capillaryStrength === 'number' && Number.isFinite(data.capillaryStrength)) {
+    params.capillaryStrength = clamp(data.capillaryStrength, 0, 1);
+  }
+  if (typeof data.capillaryAmplitude_m === 'number' && Number.isFinite(data.capillaryAmplitude_m)) {
+    params.capillaryAmplitude_m = clamp(data.capillaryAmplitude_m, 0, 0.02);
+  }
+  if (typeof data.capillarySlopeFalloff === 'number' && Number.isFinite(data.capillarySlopeFalloff)) {
+    params.capillarySlopeFalloff = clamp(data.capillarySlopeFalloff, 0.25, 3);
+  }
+  if (typeof data.capillaryDirectionalSpread === 'number' && Number.isFinite(data.capillaryDirectionalSpread)) {
+    params.capillaryDirectionalSpread = clamp(data.capillaryDirectionalSpread, 0, 1);
+  }
+  if (typeof data.capillaryWaveCount === 'number' && Number.isFinite(data.capillaryWaveCount)) {
+    params.capillaryWaveCount = Math.round(clamp(data.capillaryWaveCount, 0, 16));
+  }
+  if (typeof data.rogueEnabled === 'boolean') params.rogueEnabled = data.rogueEnabled;
+  if (typeof data.rogueChance_pct === 'number' && Number.isFinite(data.rogueChance_pct)) {
+    params.rogueChance_pct = clamp(data.rogueChance_pct, 0, 100);
+  }
+  if (typeof data.rogueDuration_s === 'number' && Number.isFinite(data.rogueDuration_s)) {
+    params.rogueDuration_s = clamp(data.rogueDuration_s, 2, 40);
+  }
+  if (typeof data.rogueComponentCount === 'number' && Number.isFinite(data.rogueComponentCount)) {
+    params.rogueComponentCount = Math.round(clamp(data.rogueComponentCount, 1, 10));
+  }
+  if (typeof data.rogueAmplitudeBoost === 'number' && Number.isFinite(data.rogueAmplitudeBoost)) {
+    params.rogueAmplitudeBoost = clamp(data.rogueAmplitudeBoost, 0, 250);
+  }
+  if (typeof data.roguePhaseAlign_pct === 'number' && Number.isFinite(data.roguePhaseAlign_pct)) {
+    params.roguePhaseAlign_pct = clamp(data.roguePhaseAlign_pct, 0, 100);
+  }
+  if (typeof data.pulseAmplitude_m === 'number' && Number.isFinite(data.pulseAmplitude_m)) {
+    params.pulseAmplitude_m = clamp(data.pulseAmplitude_m, 0, 6);
+  }
+  if (typeof data.pulseWavelength_m === 'number' && Number.isFinite(data.pulseWavelength_m)) {
+    params.pulseWavelength_m = clamp(data.pulseWavelength_m, 40, 1200);
+  }
+  if (typeof data.pulseDecayLength_m === 'number' && Number.isFinite(data.pulseDecayLength_m)) {
+    params.pulseDecayLength_m = clamp(data.pulseDecayLength_m, 40, 2000);
+  }
+  if (typeof data.pulseDuration_s === 'number' && Number.isFinite(data.pulseDuration_s)) {
+    params.pulseDuration_s = clamp(data.pulseDuration_s, 2, 90);
+  }
+  if (typeof data.pulseSpeedScale === 'number' && Number.isFinite(data.pulseSpeedScale)) {
+    params.pulseSpeedScale = clamp(data.pulseSpeedScale, 0.25, 4);
+  }
+  if (typeof data.pulseDirection_deg === 'number' && Number.isFinite(data.pulseDirection_deg)) {
+    params.pulseDirection_deg = clamp(data.pulseDirection_deg, 0, 360);
+  }
   if (isQualityMode(data.quality)) params.quality = data.quality;
   if (typeof data.perfOverlay === 'boolean') params.perfOverlay = data.perfOverlay;
   if (typeof data.reduceFlashes === 'boolean') params.reduceFlashes = data.reduceFlashes;
@@ -382,6 +541,31 @@ export function savePersistedParams(params: AppParams): void {
     cameraDistance_m: params.cameraDistance_m,
     cameraElevation_m: params.cameraElevation_m,
     clarity_pct: params.clarity_pct,
+    tideAmplitude_m: params.tideAmplitude_m,
+    tidePeriod_h: params.tidePeriod_h,
+    tidePhase_deg: params.tidePhase_deg,
+    seicheEnabled: params.seicheEnabled,
+    seicheAmplitude_m: params.seicheAmplitude_m,
+    seichePeriod_s: params.seichePeriod_s,
+    windSeaIntensity: params.windSeaIntensity,
+    swellIntensity: params.swellIntensity,
+    capillaryStrength: params.capillaryStrength,
+    capillaryAmplitude_m: params.capillaryAmplitude_m,
+    capillarySlopeFalloff: params.capillarySlopeFalloff,
+    capillaryDirectionalSpread: params.capillaryDirectionalSpread,
+    capillaryWaveCount: params.capillaryWaveCount,
+    rogueEnabled: params.rogueEnabled,
+    rogueChance_pct: params.rogueChance_pct,
+    rogueDuration_s: params.rogueDuration_s,
+    rogueComponentCount: params.rogueComponentCount,
+    rogueAmplitudeBoost: params.rogueAmplitudeBoost,
+    roguePhaseAlign_pct: params.roguePhaseAlign_pct,
+    pulseAmplitude_m: params.pulseAmplitude_m,
+    pulseWavelength_m: params.pulseWavelength_m,
+    pulseDecayLength_m: params.pulseDecayLength_m,
+    pulseDuration_s: params.pulseDuration_s,
+    pulseSpeedScale: params.pulseSpeedScale,
+    pulseDirection_deg: params.pulseDirection_deg,
     quality: params.quality,
     perfOverlay: params.perfOverlay,
     reduceFlashes: params.reduceFlashes,
@@ -412,11 +596,18 @@ function setEnabled(ctrl: any, enabled: boolean): void {
   el.style.opacity = enabled ? '1' : '0.35';
 }
 
+function setTooltip(ctrl: any, text: string): void {
+  const el = ctrl?.domElement as HTMLElement | undefined;
+  if (!el) return;
+  el.title = text;
+}
+
 export interface GUIHandlers {
   onAnyChange: () => void;
   onStartGame: () => void;
   onNewGame: () => void;
   onResetSettings?: () => void;
+  onPulseTrigger?: () => void;
 
   /** Camera-only controls should not force a world rebuild. */
   onCameraChange?: () => void;
@@ -441,6 +632,11 @@ export function createGUI(params: AppParams, h: GUIHandlers): GUI {
     },
     resetSettings: () => {
       h.onResetSettings?.();
+    }
+  };
+  const pulseActions = {
+    triggerPulse: () => {
+      h.onPulseTrigger?.();
     }
   };
 
@@ -533,7 +729,124 @@ export function createGUI(params: AppParams, h: GUIHandlers): GUI {
   });
 
   const fWater = gui.addFolder('Water');
-  fWater.add(params, 'clarity_pct', 0, 100, 1).name('clarity (%)').onChange(h.onAnyChange);
+  const cClarity = fWater.add(params, 'clarity_pct', 0, 100, 1).name('clarity (%)');
+  cClarity.onChange(h.onAnyChange);
+
+  const fTide = fWater.addFolder('Tide');
+  const cTideAmp = fTide.add(params, 'tideAmplitude_m', 0, 3, 0.01).name('amplitude (m)');
+  const cTidePeriod = fTide.add(params, 'tidePeriod_h', 4, 30, 0.01).name('period (h)');
+  const cTidePhase = fTide.add(params, 'tidePhase_deg', 0, 360, 0.5).name('phase (deg)');
+
+  cTideAmp.onChange(h.onAnyChange);
+  cTidePeriod.onChange(h.onAnyChange);
+  cTidePhase.onChange(h.onAnyChange);
+
+  const fSeiche = fWater.addFolder('Seiche');
+  const cSeiche = fSeiche.add(params, 'seicheEnabled').name('enabled');
+  const cSeicheAmp = fSeiche.add(params, 'seicheAmplitude_m', 0, 3, 0.01).name('amplitude (m)');
+  const cSeichePeriod = fSeiche.add(params, 'seichePeriod_s', 30, 600, 1).name('period (s)');
+
+  const updateSeicheEnabled = () => {
+    setEnabled(cSeicheAmp, params.seicheEnabled);
+    setEnabled(cSeichePeriod, params.seicheEnabled);
+  };
+  updateSeicheEnabled();
+
+  cSeiche.onChange(() => {
+    updateSeicheEnabled();
+    h.onAnyChange();
+  });
+  cSeicheAmp.onChange(h.onAnyChange);
+  cSeichePeriod.onChange(h.onAnyChange);
+
+  const fPulse = fWater.addFolder('Seismic Pulse');
+  const cPulseAmp = fPulse.add(params, 'pulseAmplitude_m', 0, 6, 0.05).name('amplitude (m)');
+  const cPulseWave = fPulse.add(params, 'pulseWavelength_m', 40, 1200, 1).name('wavelength (m)');
+  const cPulseDecay = fPulse.add(params, 'pulseDecayLength_m', 40, 2000, 1).name('decay length (m)');
+  const cPulseDur = fPulse.add(params, 'pulseDuration_s', 2, 90, 0.1).name('duration (s)');
+  const cPulseSpeed = fPulse.add(params, 'pulseSpeedScale', 0.25, 4, 0.01).name('speed scale');
+  const cPulseDir = fPulse.add(params, 'pulseDirection_deg', 0, 360, 1).name('direction (°)');
+  const cPulseTrigger = fPulse.add(pulseActions, 'triggerPulse').name('trigger pulse');
+
+  cPulseAmp.onChange(h.onAnyChange);
+  cPulseWave.onChange(h.onAnyChange);
+  cPulseDecay.onChange(h.onAnyChange);
+  cPulseDur.onChange(h.onAnyChange);
+  cPulseSpeed.onChange(h.onAnyChange);
+  cPulseDir.onChange(h.onAnyChange);
+
+  const fRogue = fWater.addFolder('Rogue Waves');
+  const cRogue = fRogue.add(params, 'rogueEnabled').name('enabled');
+  const cRogueChance = fRogue.add(params, 'rogueChance_pct', 0, 100, 1).name('chance per min (%)');
+  const cRogueDur = fRogue.add(params, 'rogueDuration_s', 2, 40, 0.1).name('duration (s)');
+  const cRogueCount = fRogue.add(params, 'rogueComponentCount', 1, 10, 1).name('boosted components');
+  const cRogueAmp = fRogue.add(params, 'rogueAmplitudeBoost', 0, 250, 5).name('amp boost (%)');
+  const cRoguePhase = fRogue.add(params, 'roguePhaseAlign_pct', 0, 100, 1).name('phase align (%)');
+
+  const updateRogueEnabled = () => {
+    const on = params.rogueEnabled;
+    setEnabled(cRogueChance, on);
+    setEnabled(cRogueDur, on);
+    setEnabled(cRogueCount, on);
+    setEnabled(cRogueAmp, on);
+    setEnabled(cRoguePhase, on);
+  };
+  updateRogueEnabled();
+
+  cRogue.onChange(() => {
+    updateRogueEnabled();
+    h.onAnyChange();
+  });
+  cRogueChance.onChange(h.onAnyChange);
+  cRogueDur.onChange(h.onAnyChange);
+  cRogueCount.onChange(h.onAnyChange);
+  cRogueAmp.onChange(h.onAnyChange);
+  cRoguePhase.onChange(h.onAnyChange);
+
+  const cWindSea = fWater.add(params, 'windSeaIntensity', 0, 2, 0.01).name('wind sea intensity');
+  cWindSea.onChange(h.onAnyChange);
+  const cSwell = fWater.add(params, 'swellIntensity', 0, 2, 0.01).name('swell intensity');
+  cSwell.onChange(h.onAnyChange);
+
+  const fCap = fWater.addFolder('Capillary');
+  const cCapStrength = fCap.add(params, 'capillaryStrength', 0, 1, 0.01).name('speckle strength');
+  const cCapAmp = fCap.add(params, 'capillaryAmplitude_m', 0, 0.02, 0.0005).name('amplitude (m)');
+  const cCapSlope = fCap.add(params, 'capillarySlopeFalloff', 0.25, 3.0, 0.05).name('slope falloff');
+  const cCapSpread = fCap.add(params, 'capillaryDirectionalSpread', 0, 1, 0.01).name('direction spread');
+  const cCapCount = fCap.add(params, 'capillaryWaveCount', 0, 16, 1).name('wave count');
+
+  cCapStrength.onChange(h.onAnyChange);
+  cCapAmp.onChange(h.onAnyChange);
+  cCapSlope.onChange(h.onAnyChange);
+  cCapSpread.onChange(h.onAnyChange);
+  cCapCount.onChange(h.onAnyChange);
+
+  setTooltip(cTideAmp, 'Tide amplitude in meters. Range: 0-3 (safe <=2).');
+  setTooltip(cTidePeriod, 'Tide period in hours. Range: 4-30 (12.42 = M2).');
+  setTooltip(cTidePhase, 'Tide phase offset in degrees. Range: 0-360.');
+  setTooltip(cSeiche, 'Standing basin wave toggle. Safe range: on/off.');
+  setTooltip(cSeicheAmp, 'Peak seiche amplitude in meters. Safe range: 0-1.5 (3 is extreme).');
+  setTooltip(cSeichePeriod, 'Seiche period in seconds. Safe range: 30-600 (longer = calmer).');
+  setTooltip(cPulseAmp, 'Pulse height in meters. Safe range: 0.5-3 (higher = dramatic).');
+  setTooltip(cPulseWave, 'Pulse wavelength in meters. Longer = faster + smoother.');
+  setTooltip(cPulseDecay, 'Pulse envelope decay length in meters. Longer = broader wave packet.');
+  setTooltip(cPulseDur, 'Pulse lifetime in seconds. Longer = more travel time.');
+  setTooltip(cPulseSpeed, 'Scales the physical group speed. 1 = physical, >1 = stylized.');
+  setTooltip(cPulseDir, 'Travel direction (toward) in degrees.');
+  setTooltip(cPulseTrigger, 'Fire a seismic pulse starting at the otter position.');
+  setTooltip(cRogue, 'Enable rogue-wave events (rare amplitude/phase boosts).');
+  setTooltip(cRogueChance, 'Chance per minute. Range: 0-100% (safe <=20%).');
+  setTooltip(cRogueDur, 'Event duration in seconds. Range: 2-40 (safe 4-12).');
+  setTooltip(cRogueCount, 'Boosted component count. Range: 1-10 (safe 2-5).');
+  setTooltip(cRogueAmp, 'Amplitude boost (%). Range: 0-250 (safe 50-150).');
+  setTooltip(cRoguePhase, 'Phase alignment (%). Range: 0-100 (safe <=70).');
+  setTooltip(cWindSea, 'Boosts foam/roughness from wind-sea energy. Range: 0-2 (safe 0-1.5).');
+  setTooltip(cSwell, 'Scales long-wave displacement (swell). Range: 0-2 (safe 0.6-1.4).');
+  setTooltip(cCapStrength, 'Boosts glancing capillary sparkle + foam speckle. Range: 0-1 (safe <=0.5).');
+  setTooltip(cCapAmp, 'Capillary ripple height scale (m). Range: 0-0.02 (safe <=0.01).');
+  setTooltip(cCapSlope, 'Capillary amplitude falloff for shorter ripples. Range: 0.25-3 (safe 0.6-2).');
+  setTooltip(cCapSpread, 'Capillary direction spread. 0=aligned, 1=broad. Range: 0-1 (safe <=0.4).');
+  setTooltip(cCapCount, 'Capillary component count carved from total waves. Range: 0-16 (safe 4-10).');
 
   const fPerf = gui.addFolder('Performance Mode');
   const qCtrl = fPerf.add(params, 'quality', ['Low', 'Medium', 'High', 'Max']).name('mode');

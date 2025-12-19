@@ -21,9 +21,19 @@ import type { WindSpray } from '../lib/windSpray';
 import type { OtterRipples } from '../lib/ripples';
 import type { WakeRibbon } from '../lib/wakeRibbon';
 import type { PerfOverlay } from '../lib/perfOverlay';
-import { clamp, lerp } from '../lib/math';
+import type { OverlayWarning } from '../lib/overlay';
+import { clamp, degToRad, lerp } from '../lib/math';
 import { computeCelestials } from '../lib/celestial';
-import { computeDerivedFromU10, predictWaveHsTpCEM } from '../lib/wavePhysics';
+import {
+  applyRogueToWaves,
+  buildSeicheComponents,
+  buildTideComponent,
+  computeDerivedFromU10,
+  computeTide,
+  predictWaveHsTpCEM,
+  pulseWindow01
+} from '../lib/wavePhysics';
+import type { RogueWaveScheduler, SeismicPulseState } from '../lib/wavePhysics';
 import { buildWaveComponents } from '../lib/spectrum';
 import { biomeFor } from '../lib/life';
 import { sampleGerstner } from '../lib/waveSample';
@@ -110,6 +120,9 @@ export type LoopState = {
   set windDirTo_rad(v: number);
   get swellDirTo_rad(): number;
   set swellDirTo_rad(v: number);
+  seismicPulse: SeismicPulseState;
+  rogueScheduler: RogueWaveScheduler;
+  rogueWarning: OverlayWarning;
   otterPrevXZ: THREE.Vector2;
   get otterSpeed_mps(): number;
   set otterSpeed_mps(v: number);
@@ -131,11 +144,13 @@ const tmpV2a = new THREE.Vector2();
 const tmpV2b = new THREE.Vector2();
 const tmpWindXZ = new THREE.Vector2();
 const tmpOtterXZ = new THREE.Vector2();
+const tmpRogueXZ = new THREE.Vector2();
 const tmpOtterDirXZ = new THREE.Vector2();
 const tmpSunWorldPos = new THREE.Vector3();
 const tmpSunNDC = new THREE.Vector3();
 
 const tmpSurfSample = { height_m: 0, normal: new THREE.Vector3(), disp: new THREE.Vector3(), slope: 0 };
+const tmpSurfSampleEvent = { height_m: 0, normal: new THREE.Vector3(), disp: new THREE.Vector3(), slope: 0 };
 const tmpSurfT = new THREE.Vector3();
 const tmpSurfB = new THREE.Vector3();
 
@@ -171,6 +186,7 @@ export function startAnimationLoop(state: LoopState): LoopControls {
   let lightningBurstPulses = 0;
   let lightningNextPulse_s = 0;
   let currentBiome = biomeFor(state.params.latitude_deg, 12);
+  const rogueWaves: WaveComponent[] = [];
 
   function handleVisibilityChange(): void {
     simPaused = document.hidden;
@@ -219,6 +235,10 @@ export function startAnimationLoop(state: LoopState): LoopControls {
     const dtRaw = clock.getDelta();
     const dt = Math.min(0.05, Math.max(0.0, dtRaw));
     state.simTime_s += dt;
+    const pulseGate = state.seismicPulse.component.A > 1e-6
+      ? pulseWindow01(state.simTime_s, state.seismicPulse.startTime_s, state.seismicPulse.duration_s)
+      : 0;
+    const pulseFoamDamp = clamp(1.0 - 0.55 * pulseGate, 0.0, 1.0);
 
     const kEma = 1 - Math.exp(-dt / 0.25);
     dtEma_s = lerp(dtEma_s, dt, kEma);
@@ -281,10 +301,13 @@ export function startAnimationLoop(state: LoopState): LoopControls {
     const night = clamp(1 - cel.sunIntensity, 0, 1);
     const sunset = clamp(1 - clamp((cel.sunElevation_rad + 0.04) / 0.35, 0, 1), 0, 1);
 
-    const tidePeriod_s = 12.42 * 3600;
-    const tidePhase = (state.simTime_s / tidePeriod_s) * Math.PI * 2;
-    const tideAmp = lerp(0.35, 1.25, clamp(state.params.coastProximity, 0, 1));
-    const tideHeight_m = Math.sin(tidePhase) * tideAmp * cel.tideScale;
+    const tideBaseAmp_m = Math.max(0, state.params.tideAmplitude_m);
+    const tideCoastScale = lerp(0.35, 1.25, clamp(state.params.coastProximity, 0, 1));
+    const tideAmp_m = tideBaseAmp_m * tideCoastScale * cel.tideScale;
+    const tidePeriod_s = Math.max(1e-3, state.params.tidePeriod_h * 3600);
+    const tidePhase_rad = degToRad(state.params.tidePhase_deg);
+    const tide = computeTide({ amplitude_m: tideAmp_m, period_s: tidePeriod_s, phase_rad: tidePhase_rad }, state.simTime_s);
+    const tideHeight_m = tide.height_m;
 
     const cc = clamp(wx.cloudCover, 0, 1);
 
@@ -422,7 +445,8 @@ export function startAnimationLoop(state: LoopState): LoopControls {
     const windDirTo = (wx.windDirFrom_deg * Math.PI) / 180 + Math.PI;
     const ekman = (state.params.latitude_deg >= 0 ? Math.PI / 4 : -Math.PI / 4);
     const curDir = windDirTo + ekman;
-    const curSpeed = clamp(wx.windSpeed_mps * 0.014, 0, 1.2) + 0.04 * Math.sin(tidePhase);
+    const windCurSpeed = clamp(wx.windSpeed_mps * 0.014, 0, 1.2);
+    const curSpeed = windCurSpeed + tide.current_mps;
     tmpV2b.set(Math.cos(curDir) * curSpeed, Math.sin(curDir) * curSpeed);
     const currentXZ = tmpV2b;
 
@@ -462,21 +486,59 @@ export function startAnimationLoop(state: LoopState): LoopControls {
 
     const swellVar = clamp(0.55 - 0.45 * storminess - 0.25 * wind01, 0.15, 0.65);
 
-    if (state.needsRebuild || state.wavesTarget.length === 0) {
-      const targetCount = waveCountForQuality(state.params.quality);
-      state.wavesTarget = buildWaveComponents({
+    const seicheEnabled = state.params.seicheEnabled && state.params.seicheAmplitude_m > 0 && state.params.seichePeriod_s > 1;
+    const seicheCount = seicheEnabled ? 2 : 0;
+    const tideCount = 1;
+    // Subtle long-wave modulation layered on top of the uniform tide offset.
+    const tideLongAmp_m = tideAmp_m * 0.2;
+    const tideComponent = buildTideComponent({
+      amplitude_m: tideLongAmp_m,
+      period_s: tidePeriod_s,
+      depth_m: state.params.depth_m,
+      dirTo_rad: curDir,
+      phase_rad: tidePhase_rad
+    });
+
+    const baseWaveCount = Math.max(4, waveCountForQuality(state.params.quality) - seicheCount - tideCount);
+
+    const buildWaveTarget = (): WaveComponent[] => {
+      const base = buildWaveComponents({
         Hs_m: state.seaHs_m,
         Tp_s: state.seaTp_s,
         depth_m: state.params.depth_m,
         windDirTo_rad: state.windDirTo_rad,
+        windSpeed_mps: wx.windSpeed_mps,
         swellDirTo_rad: state.swellDirTo_rad,
         swellVariance: swellVar,
-        waveCount: targetCount,
+        waveCount: baseWaveCount,
         directionalSpread,
         gamma: lerp(1.6, 4.2, clamp(wx.storminess + wx.hurricaneIntensity, 0, 1)),
         choppiness,
+        capillaryAmplitude_m: state.params.capillaryAmplitude_m,
+        capillarySlopeFalloff: state.params.capillarySlopeFalloff,
+        capillaryDirectionalSpread: state.params.capillaryDirectionalSpread,
+        capillaryWaveCount: state.params.capillaryWaveCount,
         seed: 1337
       });
+
+      if (!seicheEnabled) {
+        base.push(tideComponent);
+        return base;
+      }
+
+      const seiche = buildSeicheComponents({
+        amplitude_m: state.params.seicheAmplitude_m,
+        period_s: state.params.seichePeriod_s,
+        depth_m: state.params.depth_m,
+        dirTo_rad: state.swellDirTo_rad
+      });
+      base.push(...seiche);
+      base.push(tideComponent);
+      return base;
+    };
+
+    if (state.needsRebuild || state.wavesTarget.length === 0) {
+      state.wavesTarget = buildWaveTarget();
 
       if (state.wavesCurrent.length !== state.wavesTarget.length) {
         state.wavesCurrent = state.wavesTarget.map((w) => ({ ...w }));
@@ -484,20 +546,13 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       state.needsRebuild = false;
     } else {
       if (state.simTime_s % 2.0 < dt) {
-        state.wavesTarget = buildWaveComponents({
-          Hs_m: state.seaHs_m,
-          Tp_s: state.seaTp_s,
-          depth_m: state.params.depth_m,
-          windDirTo_rad: state.windDirTo_rad,
-          swellDirTo_rad: state.swellDirTo_rad,
-          swellVariance: swellVar,
-          waveCount: state.wavesTarget.length,
-          directionalSpread,
-          gamma: lerp(1.6, 4.2, clamp(wx.storminess + wx.hurricaneIntensity, 0, 1)),
-          choppiness,
-          seed: 1337
-        });
+        state.wavesTarget = buildWaveTarget();
       }
+    }
+
+    const tideIndex = state.wavesTarget.length - 1;
+    if (tideIndex >= 0 && state.wavesTarget[tideIndex]?.band.label === 'tide') {
+      copyWaveComponent(state.wavesTarget[tideIndex], tideComponent);
     }
 
     const chase = clamp(dt * 0.85, 0, 1);
@@ -511,8 +566,23 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       c.omega = lerp(c.omega, tW.omega, chase);
       c.phase = tW.phase;
       c.Q = lerp(c.Q, tW.Q, chase);
+      c.band = tW.band;
     }
-    state.oceanMat.writeWaves(state.wavesCurrent);
+    const rogueSettings = {
+      enabled: state.params.rogueEnabled,
+      chancePerMinute: clamp(state.params.rogueChance_pct / 100, 0, 1),
+      duration_s: Math.max(2.0, state.params.rogueDuration_s),
+      componentCount: Math.max(1, Math.floor(state.params.rogueComponentCount)),
+      ampBoost: clamp(state.params.rogueAmplitudeBoost / 100, 0, 2.5),
+      phaseAlign: clamp(state.params.roguePhaseAlign_pct / 100, 0, 1)
+    };
+    tmpRogueXZ.set(state.otter.position.x, state.otter.position.z);
+    const rogueState = state.rogueScheduler.update(dt, state.simTime_s, state.wavesCurrent, currentXZ, tmpRogueXZ, rogueSettings);
+    const rogueFx = rogueState.active ? rogueState.envelope : 0;
+    state.rogueWarning.setIntensity(rogueFx);
+
+    const wavesForRender = rogueFx > 1e-5 ? applyRogueToWaves(state.wavesCurrent, rogueState, rogueWaves) : state.wavesCurrent;
+    state.oceanMat.writeWaves(wavesForRender);
 
     state.ocean.position.set(state.camera.position.x, 0, state.camera.position.z);
 
@@ -548,11 +618,16 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       foamIntensity,
       foamSlopeStart,
       foamSlopeEnd,
+      rogueIntensity: rogueFx,
+      windSeaIntensity: state.params.windSeaIntensity,
+      swellIntensity: state.params.swellIntensity,
+      pulse: state.seismicPulse,
 
       windXZ: tmpWindXZ,
       microStrength,
       microFadeNear_m: microFadeNear,
       microFadeFar_m: microFadeFar,
+      capillaryStrength: state.params.capillaryStrength,
 
       sunDir,
       sunColor: state.sunLight.color,
@@ -574,7 +649,10 @@ export function startAnimationLoop(state: LoopState): LoopControls {
         time_s: state.simTime_s,
         waves: state.wavesCurrent,
         currentXZ,
-        tideHeight_m
+        tideHeight_m,
+        rogue: rogueState,
+        pulse: state.seismicPulse,
+        pulseFoamDamp
       }
     );
 
@@ -597,7 +675,22 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       tideHeight_m,
       tmpSurfSample,
       tmpSurfT,
-      tmpSurfB
+      tmpSurfB,
+      rogueState,
+      state.seismicPulse
+    );
+    const surfEvent = sampleGerstner(
+      state.wavesCurrent,
+      tmpV2a,
+      state.simTime_s,
+      currentXZ,
+      tideHeight_m,
+      tmpSurfSampleEvent,
+      tmpSurfT,
+      tmpSurfB,
+      rogueState,
+      state.seismicPulse,
+      { includeTags: ['event'], applyCrestSharpness: true }
     );
     const headPos = state.otter.getHeadWorldPosition(tmpV3c);
     const eyePos = state.otter.getEyeWorldPosition(tmpV3d);
@@ -616,6 +709,7 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       headPos,
       eyePos,
       surfaceHeight_m: surf.height_m,
+      seaLevel_m: tideHeight_m,
       underwater: state.otter.isUnderwaterView(),
       storminess: clamp(wx.precipIntensity + wx.storminess + wx.hurricaneIntensity, 0, 1),
       followDistance_m: state.params.cameraDistance_m,
@@ -653,7 +747,8 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       surfaceY_m: surf.height_m,
       speed_mps: state.otterSpeed_mps,
       paddleImpulse01: (state.otter as any).paddleImpulse01 ?? 0,
-      calm01: calmness
+      calm01: calmness,
+      pulseFoamDamp
     });
 
     const underwater = state.camera.position.y < (surf.height_m - 0.08);
@@ -669,7 +764,8 @@ export function startAnimationLoop(state: LoopState): LoopControls {
     if (state.postFX.ssrPass) state.postFX.ssrPass.enabled = underwaterBlend < 0.02;
 
     if (state.postFX.underwaterPass) {
-      (state.postFX.underwaterPass as any).enabled = underwaterBlend > 0.001;
+      const uwPass = state.postFX.underwaterPass as any;
+      uwPass.enabled = underwaterBlend > 0.001;
 
       tmpSunWorldPos.copy(state.camera.position).addScaledVector(sunDir, 12000);
       tmpSunNDC.copy(tmpSunWorldPos).project(state.camera);
@@ -677,16 +773,25 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       const sunUvY = tmpSunNDC.y * 0.5 + 0.5;
       const sunInView = (tmpSunNDC.z > -1.0 && tmpSunNDC.z < 1.0 && sunUvX > -0.15 && sunUvX < 1.15 && sunUvY > -0.15 && sunUvY < 1.15) ? 1.0 : 0.0;
 
-      (state.postFX.underwaterPass as any).uniforms.u_time.value = state.simTime_s;
-      (state.postFX.underwaterPass as any).uniforms.u_underwater.value = underwaterBlend;
-      (state.postFX.underwaterPass as any).uniforms.u_clarity.value = clarity;
-      (state.postFX.underwaterPass as any).uniforms.u_waterLevel.value = tideHeight_m;
-      (state.postFX.underwaterPass as any).uniforms.u_sunUv.value.set(sunUvX, sunUvY);
-      (state.postFX.underwaterPass as any).uniforms.u_sunInView.value = sunInView;
-      (state.postFX.underwaterPass as any).uniforms.u_sunIntensity.value = sunVis;
-      (state.postFX.underwaterPass as any).uniforms.u_sunColor.value.copy(state.sunLight.color);
-      (state.postFX.underwaterPass as any).uniforms.u_invProj.value.copy(state.camera.projectionMatrixInverse);
-      (state.postFX.underwaterPass as any).uniforms.u_invView.value.copy(state.camera.matrixWorld);
+      uwPass.uniforms.u_time.value = state.simTime_s;
+      uwPass.uniforms.u_underwater.value = underwaterBlend;
+      uwPass.uniforms.u_clarity.value = clarity;
+      if (uwPass.setWaterLevel) {
+        uwPass.setWaterLevel(tideHeight_m);
+      } else {
+        uwPass.uniforms.u_waterLevel.value = tideHeight_m;
+      }
+      if (uwPass.setCameraWorldY) {
+        uwPass.setCameraWorldY(state.camera.position.y);
+      } else if (uwPass.uniforms.u_cameraWorldY) {
+        uwPass.uniforms.u_cameraWorldY.value = state.camera.position.y;
+      }
+      uwPass.uniforms.u_sunUv.value.set(sunUvX, sunUvY);
+      uwPass.uniforms.u_sunInView.value = sunInView;
+      uwPass.uniforms.u_sunIntensity.value = sunVis;
+      uwPass.uniforms.u_sunColor.value.copy(state.sunLight.color);
+      uwPass.uniforms.u_invProj.value.copy(state.camera.projectionMatrixInverse);
+      uwPass.uniforms.u_invView.value.copy(state.camera.matrixWorld);
     }
 
     const paddleImpulse01 = (state.otter as any).paddleImpulse01 ?? 0;
@@ -699,14 +804,16 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       dt_s: dt,
       time_s: state.simTime_s,
       centerXZ: tmpOtterXZ,
-      waves: state.wavesCurrent,
+      waves: wavesForRender,
       currentXZ,
       windDirTo_rad: state.windDirTo_rad,
       windSpeed_mps: wx.windSpeed_mps,
       storminess,
+      rogueIntensity: rogueFx,
       wakePosXZ: tmpOtterXZ,
       wakeDirXZ: tmpOtterDirXZ,
-      wakeStrength
+      wakeStrength,
+      capillaryStrength: state.params.capillaryStrength
     });
     state.oceanMat.bindFoamMap(state.foamField.texture);
     state.oceanMat.setFoamFieldTransform(state.foamField.centerXZ, state.foamField.worldSize_m);
@@ -824,7 +931,7 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       dt_s: dt,
       origin: state.otter.position,
       surfaceY: surf.height_m,
-      slope: surf.slope,
+      slope: surfEvent.slope,
       intensity: clamp(
         (
           clamp(wx.windSpeed_mps / 20, 0, 1) * (0.25 + 0.75 * clamp(wx.storminess + wx.hurricaneIntensity, 0, 1)) * (1.0 + 0.90 * crossSea01)
@@ -847,6 +954,7 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       windSpeed_mps: wx.windSpeed_mps,
       gustiness: wx.gustiness,
       storminess,
+      rogueIntensity: rogueFx,
       visible: !underwater
     });
 
@@ -933,6 +1041,17 @@ export function startAnimationLoop(state: LoopState): LoopControls {
 function lerpAngleRad(a: number, b: number, t: number): number {
   const da = ((b - a + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
   return a + da * t;
+}
+
+function copyWaveComponent(dst: WaveComponent, src: WaveComponent): void {
+  dst.dirX = src.dirX;
+  dst.dirZ = src.dirZ;
+  dst.A = src.A;
+  dst.k = src.k;
+  dst.omega = src.omega;
+  dst.phase = src.phase;
+  dst.Q = src.Q;
+  dst.band = src.band;
 }
 
 function waveCountForQuality(q: AppParams['quality']): number {

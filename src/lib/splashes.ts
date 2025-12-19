@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { clamp } from './math';
 import { mulberry32 } from './prng';
+import { SPLASH_TEX } from './waterParticleTextures';
 
 export interface SplashUpdate {
   dt_s: number;
@@ -35,11 +36,13 @@ export class SplashSystem {
     this.geo.setAttribute('position', posAttr);
     const mat = new THREE.PointsMaterial({
       color: new THREE.Color('#ffffff'),
-      size: 0.08,
+      map: SPLASH_TEX,
+      size: 0.12,
       transparent: true,
       opacity: 0.0,
       depthWrite: false,
-      blending: THREE.AdditiveBlending
+      blending: THREE.AdditiveBlending,
+      alphaTest: 0.02
     });
     this.points = new THREE.Points(this.geo, mat);
     this.points.frustumCulled = false;

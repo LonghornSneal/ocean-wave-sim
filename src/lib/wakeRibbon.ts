@@ -10,6 +10,8 @@ export interface WakeRibbonUpdate {
   speed_mps: number;
   paddleImpulse01: number;
   calm01: number;
+  /** 0..1; lower values reduce foam when pulse is active. */
+  pulseFoamDamp?: number;
 }
 
 /**
@@ -101,7 +103,8 @@ export class WakeRibbon {
     const pulse = clamp(u.paddleImpulse01, 0, 1);
 
     // Wake is most legible in calm conditions.
-    const target = clamp((0.35 + 0.75 * speed01 + 0.55 * pulse) * (0.25 + 0.75 * u.calm01), 0, 1);
+    const foamDamp = clamp(u.pulseFoamDamp ?? 1.0, 0.0, 1.0);
+    const target = clamp((0.35 + 0.75 * speed01 + 0.55 * pulse) * (0.25 + 0.75 * u.calm01), 0, 1) * foamDamp;
     this.intensity = lerp(this.intensity, target, clamp(u.dt_s * 6.0, 0, 1));
     mat.uniforms.u_intensity.value = this.intensity;
 

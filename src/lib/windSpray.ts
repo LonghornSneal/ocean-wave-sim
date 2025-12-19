@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { clamp, lerp } from './math';
 import { mulberry32 } from './prng';
+import { DROPLET_TEX } from './waterParticleTextures';
 
 export interface WindSprayUpdate {
   dt_s: number;
@@ -11,6 +12,7 @@ export interface WindSprayUpdate {
   windSpeed_mps: number;
   gustiness: number;
   storminess: number;
+  rogueIntensity?: number;
   visible: boolean;
 }
 
@@ -41,11 +43,13 @@ export class WindSpray {
 
     const mat = new THREE.PointsMaterial({
       color: new THREE.Color('#e6f4ff'),
+      map: DROPLET_TEX,
       size: 0.12,
       transparent: true,
       opacity: 0.0,
       depthWrite: false,
-      blending: THREE.AdditiveBlending
+      blending: THREE.AdditiveBlending,
+      alphaTest: 0.02
     });
     this.points = new THREE.Points(this.geo, mat);
     this.points.frustumCulled = false;
@@ -79,8 +83,9 @@ export class WindSpray {
     const gust = this.gustActive_s > 0 ? this.gustStrength : 0.0;
     const wind01 = clamp(u.windSpeed_mps / 26, 0, 1);
     const storm = clamp(u.storminess, 0, 1);
+    const rogue = clamp(u.rogueIntensity ?? 0, 0, 1);
 
-    const rate = lerp(6, 90, wind01) * (0.35 + 0.65 * (u.gustiness + gust)) * (0.45 + 0.55 * storm);
+    const rate = lerp(6, 90, wind01) * (0.35 + 0.65 * (u.gustiness + gust)) * (0.45 + 0.55 * storm) * (1.0 + 0.85 * rogue);
     const spawnN = Math.min(20, Math.floor(rate * dt));
 
     const toX = Math.cos(u.windDirTo_rad);
@@ -112,7 +117,7 @@ export class WindSpray {
 
     (this.geo.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
 
-    const targetOpacity = any ? clamp(0.12 + 0.65 * (wind01 * 0.6 + gust * 0.7 + storm * 0.35), 0, 0.85) : 0;
+    const targetOpacity = any ? clamp(0.12 + 0.65 * (wind01 * 0.6 + gust * 0.7 + storm * 0.35 + rogue * 0.45), 0, 0.92) : 0;
     mat.opacity += (targetOpacity - mat.opacity) * clamp(dt * 3.0, 0, 1);
   }
 

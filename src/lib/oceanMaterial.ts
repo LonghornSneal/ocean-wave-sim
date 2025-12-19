@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import type { WaveComponent } from './spectrum';
+import { waveBandWeight, waveHasAnyTag, type WaveComponent } from './spectrum';
+import { pulseWindow01, type SeismicPulseState } from './wavePhysics';
 import { clamp } from './math';
 import { makeMicroNormalSet } from './microNormals';
 import { applyOceanMaterialShader } from './oceanMaterialShader';
@@ -15,6 +16,9 @@ export interface OceanMaterialParams {
   foamSlopeStart: number;
   foamSlopeEnd: number;
 
+  /** 0..1 boost for glancing capillary detail/speckle. */
+  capillaryStrength?: number;
+
   /** Initial wave list. */
   waves: WaveComponent[];
 }
@@ -27,6 +31,13 @@ export interface OceanUniforms {
 
   u_waveA: { value: THREE.Vector4[] };
   u_waveB: { value: THREE.Vector4[] };
+  /** 0..2 swell displacement multiplier (applied in shader for swell-tagged waves). */
+  u_swellIntensity: { value: number };
+
+  u_pulseA: { value: THREE.Vector4 };
+  u_pulseB: { value: THREE.Vector4 };
+  u_pulseC: { value: THREE.Vector4 };
+  u_pulseOrigin: { value: THREE.Vector2 };
 
   u_foamIntensity: { value: number };
   u_foamSlopeStart: { value: number };
@@ -79,6 +90,11 @@ export interface OceanUniforms {
   /** Distance fade in meters. */
   u_microFadeNear: { value: number };
   u_microFadeFar: { value: number };
+
+  /** 0..1 boost for glancing capillary detail/speckle. */
+  u_capillaryStrength: { value: number };
+  /** 0/1 flag for capillary normal availability. */
+  u_hasCapillary: { value: number };
 }
 
 // 1x1 black fallback so the shader always has a valid sampler.
@@ -125,6 +141,8 @@ export class OceanMaterial {
   public readonly material: THREE.MeshPhysicalMaterial;
   private shader: THREE.WebGLProgramParametersWithUniforms | null = null;
   public readonly uniforms: OceanUniforms;
+  private readonly baseRoughness: number;
+  private windSeaEnergyRatio = 0;
 
   constructor(params: OceanMaterialParams) {
     // Prepare fixed-size arrays
@@ -132,7 +150,7 @@ export class OceanMaterial {
     const waveB: THREE.Vector4[] = [];
     for (let i = 0; i < MAX_WAVES; i++) {
       waveA.push(new THREE.Vector4(1, 0, 0, 1)); // dirX, dirZ, A, k
-      waveB.push(new THREE.Vector4(0, 0, 0, 0)); // omega, phase, Q, unused
+      waveB.push(new THREE.Vector4(0, 0, 0, 0)); // omega, phase, Q, band info
     }
 
     this.uniforms = {
@@ -142,6 +160,12 @@ export class OceanMaterial {
       u_tideHeight: { value: 0 },
       u_waveA: { value: waveA },
       u_waveB: { value: waveB },
+      u_swellIntensity: { value: 1.0 },
+
+      u_pulseA: { value: new THREE.Vector4(1, 0, 0, 1) },
+      u_pulseB: { value: new THREE.Vector4(0, 0, 0, 0) },
+      u_pulseC: { value: new THREE.Vector4(1, -1, 0, 0) },
+      u_pulseOrigin: { value: new THREE.Vector2(0, 0) },
 
       u_foamIntensity: { value: params.foamIntensity },
       u_foamSlopeStart: { value: params.foamSlopeStart },
@@ -178,7 +202,10 @@ export class OceanMaterial {
       // Final mix strength (also faded by distance in shader).
       u_microStrength: { value: 0.08 },
       u_microFadeNear: { value: 70.0 },
-      u_microFadeFar: { value: 320.0 }
+      u_microFadeFar: { value: 320.0 },
+
+      u_capillaryStrength: { value: clamp(params.capillaryStrength ?? 0.0, 0.0, 1.0) },
+      u_hasCapillary: { value: MICRO_NORMALS.capillary === FALLBACK_NORMAL_TEX ? 0.0 : 1.0 }
     };
 
     // Physical water baseline. We add a custom sun-glint term in the shader for that
@@ -193,6 +220,7 @@ export class OceanMaterial {
       ior: 1.333,
       reflectivity: 0.78
     });
+    this.baseRoughness = this.material.roughness;
 
     // Needed for underwater view.
     this.material.side = THREE.DoubleSide;
@@ -205,7 +233,7 @@ export class OceanMaterial {
       this.shader = shader;
     };
 
-    this.material.customProgramCacheKey = () => 'OceanMaterial_v6_underwater_glow';
+    this.material.customProgramCacheKey = () => 'OceanMaterial_v8_band_meta';
 
     this.setWaves(params.waves);
   }
@@ -223,16 +251,27 @@ export class OceanMaterial {
    */
   public writeWaves(waves: WaveComponent[]): void {
     const N = Math.min(waves.length, MAX_WAVES);
+    let windEnergy = 0;
+    let totalEnergy = 0;
     for (let i = 0; i < MAX_WAVES; i++) {
       if (i < N) {
         const w = waves[i];
         this.uniforms.u_waveA.value[i].set(w.dirX, w.dirZ, w.A, w.k);
-        this.uniforms.u_waveB.value[i].set(w.omega, w.phase, w.Q, 0);
+        const swellFlag = waveHasAnyTag(w, ['swell']) ? 1 : 0;
+        const crest = waveBandWeight(w, 'foam');
+        const bandInfo = swellFlag + crest;
+        this.uniforms.u_waveB.value[i].set(w.omega, w.phase, w.Q, bandInfo);
+        const energy = w.A * w.A;
+        if (w.omega >= 0 && !waveHasAnyTag(w, ['tide'])) {
+          totalEnergy += energy;
+          if (waveHasAnyTag(w, ['wind'])) windEnergy += energy;
+        }
       } else {
         this.uniforms.u_waveA.value[i].set(1, 0, 0, 1);
         this.uniforms.u_waveB.value[i].set(0, 0, 0, 0);
       }
     }
+    this.windSeaEnergyRatio = totalEnergy > 1e-8 ? windEnergy / totalEnergy : 0;
   }
 
   public update(dt_s: number, opts: {
@@ -244,12 +283,17 @@ export class OceanMaterial {
     foamIntensity: number;
     foamSlopeStart: number;
     foamSlopeEnd: number;
+    rogueIntensity?: number;
+    windSeaIntensity: number;
+    swellIntensity: number;
+    pulse?: SeismicPulseState | null;
 
     // Milestone #3: micro normals
     windXZ: THREE.Vector2;
     microStrength: number;
     microFadeNear_m: number;
     microFadeFar_m: number;
+    capillaryStrength?: number;
 
     sunDir: THREE.Vector3;
     sunColor: THREE.Color;
@@ -260,17 +304,48 @@ export class OceanMaterial {
     this.uniforms.u_current.value.copy(opts.currentXZ);
     this.uniforms.u_tideHeight.value = opts.tideHeight_m;
 
-    this.uniforms.u_waterClarity.value = clamp(opts.waterClarity, 0, 1);
+    if (opts.pulse && opts.pulse.duration_s > 0) {
+      const p = opts.pulse.component;
+      this.uniforms.u_pulseA.value.set(p.dirX, p.dirZ, p.A, p.k);
+      this.uniforms.u_pulseB.value.set(p.omega, p.phase, p.Q, p.groupSpeed_mps);
+      this.uniforms.u_pulseC.value.set(p.decayLength_m, opts.pulse.startTime_s, opts.pulse.duration_s, 0);
+      this.uniforms.u_pulseOrigin.value.set(opts.pulse.originXZ.x, opts.pulse.originXZ.y);
+    } else {
+      this.uniforms.u_pulseA.value.set(1, 0, 0, 1);
+      this.uniforms.u_pulseB.value.set(0, 0, 0, 0);
+      this.uniforms.u_pulseC.value.set(1, -1, 0, 0);
+    }
 
-    this.uniforms.u_foamIntensity.value = clamp(opts.foamIntensity, 0, 3);
-    this.uniforms.u_foamSlopeStart.value = clamp(opts.foamSlopeStart, 0, 2);
-    this.uniforms.u_foamSlopeEnd.value = clamp(opts.foamSlopeEnd, 0, 2);
+    const rogue = clamp(opts.rogueIntensity ?? 0, 0, 1);
+    this.uniforms.u_waterClarity.value = clamp(opts.waterClarity * (1.0 - 0.12 * rogue), 0, 1);
+
+    const windSeaRatio = clamp(this.windSeaEnergyRatio, 0, 1);
+    const windSeaIntensity = clamp(opts.windSeaIntensity, 0, 2);
+    const windSeaBias = windSeaRatio * windSeaIntensity;
+    const foamBoost = 1.0 + 0.55 * windSeaBias;
+    const slopeShift = 0.05 * windSeaBias;
+    const rogueFoamBoost = 1.0 + 0.75 * rogue;
+    const rogueSlopeShift = 0.06 * rogue;
+
+    const pulseGate = opts.pulse && opts.pulse.component.A > 1e-6
+      ? pulseWindow01(opts.time_s, opts.pulse.startTime_s, opts.pulse.duration_s)
+      : 0;
+    const pulseFoamScale = clamp(1.0 - 0.55 * pulseGate, 0.0, 1.0);
+
+    this.uniforms.u_foamIntensity.value = clamp(opts.foamIntensity * foamBoost * pulseFoamScale * rogueFoamBoost, 0, 3);
+    this.uniforms.u_foamSlopeStart.value = clamp(opts.foamSlopeStart - slopeShift - rogueSlopeShift, 0, 2);
+    this.uniforms.u_foamSlopeEnd.value = clamp(opts.foamSlopeEnd - slopeShift * 1.15 - rogueSlopeShift * 0.9, 0, 2);
+    this.material.roughness = clamp(this.baseRoughness + 0.08 * windSeaBias + 0.06 * rogue, 0.02, 0.32);
+    this.uniforms.u_swellIntensity.value = clamp(opts.swellIntensity, 0, 2);
 
     // Micro normals: set wind and tuned strength / fade distances.
     this.uniforms.u_wind.value.copy(opts.windXZ);
-    this.uniforms.u_microStrength.value = clamp(opts.microStrength, 0.0, 0.35);
+    this.uniforms.u_microStrength.value = clamp(opts.microStrength * (1.0 + 0.35 * rogue), 0.0, 0.35);
     this.uniforms.u_microFadeNear.value = Math.max(1.0, opts.microFadeNear_m);
     this.uniforms.u_microFadeFar.value = Math.max(this.uniforms.u_microFadeNear.value + 1.0, opts.microFadeFar_m);
+    const capillaryStrength = opts.capillaryStrength ?? this.uniforms.u_capillaryStrength.value;
+    this.uniforms.u_capillaryStrength.value = clamp(capillaryStrength, 0.0, 1.0);
+    this.uniforms.u_hasCapillary.value = this.uniforms.u_microNormal2.value === FALLBACK_NORMAL_TEX ? 0.0 : 1.0;
 
     this.uniforms.u_sunDir.value.copy(opts.sunDir).normalize();
     this.uniforms.u_sunColor.value.copy(opts.sunColor);
