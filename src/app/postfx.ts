@@ -3,6 +3,7 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { SSRPass } from 'three/examples/jsm/postprocessing/SSRPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+import { HeightFogPostPass } from '../lib/heightFogPass';
 import { UnderwaterPostPass } from '../lib/underwaterPass';
 import { GradeShader } from '../lib/grading';
 import type { AppParams } from '../lib/ui';
@@ -11,6 +12,7 @@ import { IS_MOBILE_LIKE } from './quality';
 export type PostFXState = {
   composer: EffectComposer | null;
   ssrPass: SSRPass | null;
+  heightFogPass: ShaderPass | null;
   underwaterPass: ShaderPass | null;
   gradePass: ShaderPass | null;
   composerDepthTex: THREE.DepthTexture | null;
@@ -34,12 +36,13 @@ export function rebuildPostFX(prev: PostFXState | null, args: {
 
   let composer: EffectComposer | null = null;
   let ssrPass: SSRPass | null = null;
+  let heightFogPass: ShaderPass | null = null;
   let underwaterPass: ShaderPass | null = null;
   let gradePass: ShaderPass | null = null;
   let composerDepthTex: THREE.DepthTexture | null = null;
 
   if (args.params.quality === 'Low') {
-    return { composer, ssrPass, underwaterPass, gradePass, composerDepthTex };
+    return { composer, ssrPass, heightFogPass, underwaterPass, gradePass, composerDepthTex };
   }
 
   try {
@@ -115,16 +118,20 @@ export function rebuildPostFX(prev: PostFXState | null, args: {
     (underwaterPass as any).uniforms.u_resolution.value.set(window.innerWidth, window.innerHeight);
     composer.addPass(underwaterPass);
 
+    heightFogPass = new HeightFogPostPass();
+    composer.addPass(heightFogPass);
+
     gradePass = new ShaderPass(GradeShader as any);
     composer.addPass(gradePass);
   } catch (err) {
     console.warn('PostFX init failed; falling back to standard renderer.', err);
     composer = null;
     ssrPass = null;
+    heightFogPass = null;
     underwaterPass = null;
     gradePass = null;
     composerDepthTex = null;
   }
 
-  return { composer, ssrPass, underwaterPass, gradePass, composerDepthTex };
+  return { composer, ssrPass, heightFogPass, underwaterPass, gradePass, composerDepthTex };
 }

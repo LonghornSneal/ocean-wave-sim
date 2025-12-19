@@ -144,8 +144,8 @@ function applyOtterAppearance(): void {
 
 applyOtterAppearance();
 
-// A glowing "orb" attached to the otter for the storm scenario. This is both a
-// visible prop and a real point light that illuminates nearby water.
+// A glowing "orb" attached to the otter for the storm scenario. This is a
+// visible prop; broad illumination comes from the sky + moon.
 const otterOrbMesh = new THREE.Mesh(
   new THREE.SphereGeometry(0.12, 18, 18),
   new THREE.MeshStandardMaterial({
@@ -158,11 +158,6 @@ const otterOrbMesh = new THREE.Mesh(
 );
 otterOrbMesh.name = 'OtterOrb';
 scene.add(otterOrbMesh);
-
-const otterOrbLight = new THREE.PointLight(new THREE.Color('#bfe4ff'), 0.0, 32, 2.0);
-otterOrbLight.name = 'OtterOrbLight';
-otterOrbLight.castShadow = false;
-scene.add(otterOrbLight);
 
 const camRig = new OtterCameraRig();
 
@@ -485,7 +480,6 @@ const loopState: LoopState = {
   otter,
   camRig,
   otterOrbMesh,
-  otterOrbLight,
   life,
   precip,
   cloudLayers,
