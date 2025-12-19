@@ -1,6 +1,4 @@
 import * as THREE from 'three';
-import { Sky } from 'three/examples/jsm/objects/Sky.js';
-import { OceanMaterial } from './lib/oceanMaterial';
 import { FoamField } from './lib/foamField';
 import type { WaveComponent } from './lib/spectrum';
 import { clamp } from './lib/math';
@@ -16,24 +14,18 @@ import {
 import { WeatherSim } from './lib/weather';
 import { SeaOtter } from './lib/otter';
 import { OtterCameraRig } from './lib/otterCamera';
-import { HorizonIslands } from './lib/islands';
-import { biomeFor, OceanLife } from './lib/life';
 import { PrecipitationSystem } from './lib/precip';
-import { CloudDeck } from './lib/clouds';
-import { RainbowArc } from './lib/rainbow';
-import { SplashSystem } from './lib/splashes';
-import { OtterRipples } from './lib/ripples';
-import { WakeRibbon } from './lib/wakeRibbon';
 import { PerfOverlay } from './lib/perfOverlay';
-import { LightningBolts } from './lib/lightningBolts';
-import { WindSpray } from './lib/windSpray';
 import { applyCanvasSize } from './app/quality';
 import { installRuntimeErrorOverlay } from './app/runtimeOverlay';
-import { makeMoonSprite, makeStars, makeSunSprite } from './app/skyHelpers';
 import { AudioController } from './app/audioController';
 import { PlanarReflectionController } from './app/planarReflection';
 import { rebuildPostFX, type PostFXState } from './app/postfx';
 import { startAnimationLoop, type LoopControls, type LoopState } from './app/loop';
+import { createAtmosphere } from './app/atmosphere';
+import { createOceanSurface, foamRTSizeForQuality, foamWorldSizeForQuality, segmentsForQuality } from './app/oceanSetup';
+import { createWorldAssets } from './app/worldAssets';
+import { resetSimulationState } from './app/simReset';
 
 // ---------- Renderer / scene ----------
 
@@ -90,129 +82,40 @@ let envRT: THREE.WebGLRenderTarget | null = null;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
 
-// Fog objects (reused to avoid per-frame allocations)
-const fogAbove = new THREE.FogExp2(new THREE.Color('#6a7aa0'), 0.00004);
-const fogUnder = new THREE.FogExp2(new THREE.Color('#053044'), 0.03);
-
-// If the camera goes underwater (the otter sometimes looks down), the sky is hidden.
-// On devices where post FX can't run, that can make the world appear fully black.
-// We render a cheap background dome so underwater never becomes a "black screen".
-const underwaterDome = (() => {
-  const geo = new THREE.SphereGeometry(9000, 16, 12);
-  const mat = new THREE.MeshBasicMaterial({
-    color: fogUnder.color.clone(),
-    side: THREE.BackSide,
-    depthWrite: false,
-    depthTest: false
-  });
-  const m = new THREE.Mesh(geo, mat);
-  m.visible = false;
-  m.frustumCulled = false;
-  m.renderOrder = -1000;
-  return m;
-})();
-scene.add(underwaterDome);
-
 const camera = new THREE.PerspectiveCamera(52, window.innerWidth / window.innerHeight, 0.1, 20000);
 // Start close + low (the otter camera rig will take over immediately).
 camera.position.set(0, 1.2, 2.5);
 
-// ---------- Sky, sun, moon, stars ----------
-
-const sky = new Sky();
-sky.scale.setScalar(10000);
-scene.add(sky);
-
-const skyUniforms = sky.material.uniforms as any;
-skyUniforms['turbidity'].value = 10;
-skyUniforms['rayleigh'].value = 2.3;
-skyUniforms['mieCoefficient'].value = 0.007;
-skyUniforms['mieDirectionalG'].value = 0.8;
-
-const sunLight = new THREE.DirectionalLight(0xffffff, 1.0);
-sunLight.position.set(1, 1, 0);
-sunLight.castShadow = false;
-scene.add(sunLight);
-
-const moonLight = new THREE.DirectionalLight(0x9bb8ff, 0.25);
-moonLight.position.set(-1, 1, 0);
-scene.add(moonLight);
-
-const ambient = new THREE.HemisphereLight(0x88aaff, 0x0b1020, 0.55);
-scene.add(ambient);
-
-// Lightning flashes (superstorm). Directional light gives a broad, inexpensive
-// flash that reads well on the water.
-const lightningLight = new THREE.DirectionalLight(new THREE.Color('#e6f2ff'), 0.0);
-lightningLight.name = 'LightningLight';
-lightningLight.castShadow = false;
-scene.add(lightningLight);
-scene.add(lightningLight.target);
-
-// Camera-following fill light: keeps the otter readable on mobile (and in heavy
-// cloud / night scenes) without having to crank global exposure.
-const otterFillLight = new THREE.DirectionalLight(0xffffff, 0.0);
-otterFillLight.castShadow = false;
-scene.add(otterFillLight);
-scene.add(otterFillLight.target);
-
-// Temp colors (keep allocations out of the hot path)
-const tmpSunColor = new THREE.Color('#ffffff');
-// Warm tint used as the sun approaches the horizon.
-const sunWarmColor = new THREE.Color('#ffb26b');
-// Cooler tint for nighttime fill.
-const otterFillNightColor = new THREE.Color('#cfe7ff');
+const {
+  fogAbove,
+  fogUnder,
+  underwaterDome,
+  sky,
+  skyUniforms,
+  sunLight,
+  moonLight,
+  ambient,
+  lightningLight,
+  otterFillLight,
+  tmpSunColor,
+  sunWarmColor,
+  otterFillNightColor,
+  stars,
+  sunSprite,
+  moonSprite
+} = createAtmosphere(scene);
 
 // Otter motion tracking (wake / foam)
 const otterPrevXZ = new THREE.Vector2();
 let otterSpeed_mps = 0;
 
-const stars = makeStars(2500);
-scene.add(stars);
-
-const sunSprite = makeSunSprite();
-scene.add(sunSprite);
-
-const moonSprite = makeMoonSprite(0.5);
-scene.add(moonSprite);
-
 // ---------- Ocean ----------
-
-const segmentsForQuality = (q: AppParams['quality']): number => (
-  q === 'Max' ? 340 : (q === 'High' ? 260 : (q === 'Medium' ? 180 : 128))
-);
-const foamRTSizeForQuality = (q: AppParams['quality']): number => (
-  q === 'Max' ? 512 : (q === 'High' ? 384 : 256)
-);
-
-const foamWorldSizeForQuality = (q: AppParams['quality']): number => (
-  q === 'Max' ? 300 : (q === 'High' ? 260 : (q === 'Medium' ? 220 : 180))
-);
-
-const oceanGeo = new THREE.PlaneGeometry(12000, 12000, segmentsForQuality(params.quality), segmentsForQuality(params.quality));
-oceanGeo.rotateX(-Math.PI / 2);
-
 let wavesCurrent: WaveComponent[] = [];
 let wavesTarget: WaveComponent[] = [];
-
-const oceanMat = new OceanMaterial({
-  waterColor: new THREE.Color('#0a2a3a'),
-  // Foam / choppiness are derived from weather & sea-state now (not direct inputs).
-  foamIntensity: 1.1,
-  foamSlopeStart: 0.18,
-  foamSlopeEnd: 0.62,
-  waves: []
-});
-
-const ocean = new THREE.Mesh(oceanGeo, oceanMat.material);
-ocean.frustumCulled = false;
-scene.add(ocean);
-
-// Persistent foam field (milestone #2)
-let foamField = new FoamField(renderer, {
-  size: foamRTSizeForQuality(params.quality),
-  worldSize_m: foamWorldSizeForQuality(params.quality)
-});
+const oceanSetup = createOceanSurface(renderer, scene, params);
+const ocean = oceanSetup.ocean;
+const oceanMat = oceanSetup.oceanMat;
+let foamField = oceanSetup.foamField;
 
 // ---------- Post FX (quality-aware) ----------
 // - Medium/High/Max: subtle cinematic grading (warm sunset tone, grain, vignette)
@@ -276,86 +179,10 @@ let windDirTo_rad = Math.PI;
 // A slower-moving "memory" direction used for the swell band (milestone #3).
 let swellDirTo_rad = Math.PI;
 
-// Direction from the camera toward the most recent flash. Used to localize
-// lightning illumination in the cloud shader (so it doesn't brighten the whole dome).
-const lightningDir = new THREE.Vector3(0, 1, 0);
-
-// Undersea life / encounters
-const initialBiome = biomeFor(params.latitude_deg, 12);
-const life = new OceanLife({ biome: initialBiome, coastProximity: params.coastProximity, exoticEncounters: params.exoticEncounters_pct / 100 });
-scene.add(life.group);
-
-// Weather visuals
-let precip = new PrecipitationSystem(params.quality);
-scene.add(precip.group);
-
-const cloudsLow = new CloudDeck({
-  layerOffset: -0.18,
-  densityScale: 1.1,
-  opacityScale: 1.0,
-  coverScale: 1.0,
-  stormScale: 1.05,
-  rainScale: 1.0,
-  windScale: 0.85,
-  stepsScale: 1.0
-});
-cloudsLow.mesh.renderOrder = -12;
-scene.add(cloudsLow.mesh);
-
-const cloudsMid = new CloudDeck({
-  layerOffset: 0.22,
-  densityScale: 0.85,
-  opacityScale: 0.7,
-  coverScale: 0.78,
-  stormScale: 0.9,
-  rainScale: 0.75,
-  windScale: 1.05,
-  stepsScale: 0.75
-});
-cloudsMid.mesh.renderOrder = -11;
-scene.add(cloudsMid.mesh);
-
-const cloudsHigh = new CloudDeck({
-  layerOffset: 0.68,
-  densityScale: 0.55,
-  opacityScale: 0.55,
-  coverScale: 0.58,
-  stormScale: 0.65,
-  rainScale: 0.45,
-  windScale: 1.25,
-  stepsScale: 0.6
-});
-cloudsHigh.mesh.renderOrder = -10;
-scene.add(cloudsHigh.mesh);
-
-const cloudLayers = [
-  { deck: cloudsLow, minQuality: 'Low' as AppParams['quality'] },
-  { deck: cloudsMid, minQuality: 'Medium' as AppParams['quality'] },
-  { deck: cloudsHigh, minQuality: 'High' as AppParams['quality'] }
-];
-const QUALITY_RANK: Record<AppParams['quality'], number> = { Low: 0, Medium: 1, High: 2, Max: 3 };
-
-const lightningBolts = new LightningBolts();
-scene.add(lightningBolts.group);
-
-const islands = new HorizonIslands();
-scene.add(islands.group);
-
-const rainbow = new RainbowArc();
-scene.add(rainbow.mesh);
-
-const splashes = new SplashSystem();
-scene.add(splashes.points);
-
-const windSpray = new WindSpray();
-scene.add(windSpray.points);
-
-const ripples = new OtterRipples();
-scene.add(ripples.mesh);
-
-// Trailing wake ribbon/decal (cheap surface cue)
-const wakeRibbon = new WakeRibbon();
-scene.add(wakeRibbon.mesh);
+const worldAssets = createWorldAssets(scene, params);
+const { life, cloudLayers, lightningBolts, lightningDir, islands, rainbow, splashes, windSpray, ripples, wakeRibbon } = worldAssets;
+const QUALITY_RANK = worldAssets.qualityRank;
+let precip = worldAssets.precip;
 
 // ---------- Planar reflection (water) ----------
 // A mirror-camera render target that provides stable horizon/sky/object reflections.
@@ -375,50 +202,27 @@ audioController.updateHint();
 let lastQuality = params.quality;
 
 function resetSimulation(): void {
-  simTime_s = 0;
-  // Start *immediately* in a dramatic sea-state (no long "wave growth" ramp).
-  seaHs_m = 13.5;
-  seaTp_s = 13.8;
-  windDirTo_rad = Math.PI;
-  swellDirTo_rad = Math.PI;
-  wavesCurrent = [];
-  wavesTarget = [];
-  needsRebuild = true;
-
-  // Kick off the sim in an in-progress thunderstorm so the first frame already
-  // matches the "superstorm" scenario.
-  weatherSim.reset({
-    latitude_deg: params.latitude_deg,
-    longitude_deg: params.longitude_deg,
-    dayOfYear,
+  ({
+    simTime_s,
+    seaHs_m,
+    seaTp_s,
+    windDirTo_rad,
+    swellDirTo_rad,
+    wavesCurrent,
+    wavesTarget,
+    needsRebuild,
+    otterSpeed_mps
+  } = resetSimulationState({
+    params,
+    weatherSim,
     timeOfDay_h,
-    force: {
-      cloudCover01: 0.98,
-      precip01: 1.0,
-      storm01: 1.0,
-      // Keep below the hurricane threshold by default (still wicked).
-      hurricane01: 0.15,
-      windSpeed_mps: 42.0,
-      windDirFrom_deg: 42,
-      gustiness01: 1.0,
-      // Pretend the wind has been blowing for a long time so the sea is fully developed.
-      steadyAge_h: 36,
-      stormStrength01: 1.0,
-      stormDirFrom_deg: 42,
-      stormDuration_s: 2.5 * 3600,
-      // Already 35 minutes into the storm -> near peak.
-      stormActiveElapsed_s: 35 * 60
-    }
-  });
-
-  otter.reset();
-  life.reset();
-
-  otterPrevXZ.set(otter.position.x, otter.position.z);
-  otterSpeed_mps = 0;
-
-  // Clear persistent foam between runs.
-  foamField.reset(renderer, otterPrevXZ);
+    dayOfYear,
+    otter,
+    life,
+    renderer,
+    foamField,
+    otterPrevXZ
+  }));
 }
 
 function applyQualityIfChanged(): void {

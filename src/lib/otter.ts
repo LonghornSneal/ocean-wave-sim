@@ -4,27 +4,15 @@ import { clamp, lerp } from './math';
 import { mulberry32 } from './prng';
 import type { WaveComponent } from './spectrum';
 import { sampleGerstner } from './waveSample';
+import { applyOtterStormPose, setupOtterAnimations, updateOtterAnimations } from './otter/animations';
+import { updateOtterGaze } from './otter/gaze';
+import { applyOtterWetness, type WetMaterialEntry } from './otter/materials';
+import { getOtterModelUrl, preloadOtterModels } from './otter/assets';
+import { applyOtterModel, loadOtterModel } from './otter/model';
+import { showOtterLoadError } from './otter/utils';
+import type { RigNodes } from './otter/types';
 
 THREE.Cache.enabled = true;
-
-const OTTER_GLTF_CACHE = new Map<string, Promise<GLTF>>();
-
-function loadGltfCached(loader: GLTFLoader, url: string): Promise<GLTF> {
-  const cached = OTTER_GLTF_CACHE.get(url);
-  if (cached) return cached;
-
-  const pending = new Promise<GLTF>((resolve, reject) => {
-    loader.load(url, resolve, undefined, reject);
-  });
-
-  // If the load fails, allow retry on the next request.
-  pending.catch(() => {
-    OTTER_GLTF_CACHE.delete(url);
-  });
-
-  OTTER_GLTF_CACHE.set(url, pending);
-  return pending;
-}
 
 export interface OtterInputs {
   /** 0..1. Higher = more gaze changes, more random exploration. */
@@ -50,25 +38,6 @@ export type OtterLookMode = 'Horizon' | 'Sky' | 'Underwater';
 
 /** Three performance tiers: Low, Medium (rim-cheat), High (GLB + optional fur silhouette). */
 export type OtterAppearanceMode = 'Low' | 'Medium' | 'High';
-
-type RigNodes = {
-  body?: THREE.Object3D;
-  head?: THREE.Object3D;
-  tail?: THREE.Object3D;
-  flipperL?: THREE.Object3D;
-  flipperR?: THREE.Object3D;
-  eyeL?: THREE.Object3D;
-  eyeR?: THREE.Object3D;
-  whiskers?: THREE.Object3D;
-};
-
-interface WetMaterialEntry {
-  mat: THREE.MeshPhysicalMaterial;
-  dryColor: THREE.Color;
-  dryRoughness: number;
-  dryClearcoat: number;
-  dryClearcoatRoughness: number;
-}
 
 /**
  * P2 realism jump:
@@ -181,7 +150,6 @@ export class SeaOtter {
   private readonly up = new THREE.Vector3(0, 1, 0);
 
   private readonly tmpWetCol = new THREE.Color();
-  private readonly tmpDryCol = new THREE.Color();
 
   // Fallback offsets (used before GLB finishes loading)
   private readonly fallbackEyeOffset = new THREE.Vector3(0, 0.86, 0.10);
@@ -378,64 +346,26 @@ export class SeaOtter {
     this.group.quaternion.slerp(qTarget, clamp(dt * rRate, 0, 1));
     this.group.position.copy(this.position);
 
-    // --- Gaze mode decisions ---
-    if (this.lookTimer_s <= 0) {
-      const lookA = otterosity;
-      const uw = clamp(0.08 + 0.85 * Math.pow(lookA, 1.18), 0, 1);
-      const calm = 1 - storm;
-      // Keep underwater looks as an occasional flavor beat.
-      // (Too frequent makes the camera stare at featureless water, which can read
-      // as random black screens on phones.)
-      const pUnder = uw * lerp(0.02, 0.10, calm) * (1.0 - storm * 0.6);
-      const pSkyBase = lerp(0.10, 0.26, lookA) * lerp(0.55, 0.25, storm);
-      const pSky = pSkyBase * (1.0 - stormFocus);
-      const r = this.rng();
-
-      if (r < pUnder) this.lookMode = 'Underwater';
-      else if (r < pUnder + pSky) this.lookMode = 'Sky';
-      else this.lookMode = 'Horizon';
-
-      const base = lerp(2.4, 6.5, 1 - storm);
-      const jitter = lerp(0.0, 5.0, lookA) * (this.rng() * 0.6 + 0.4);
-      this.lookTimer_s = base + jitter;
-
-      // Pick a new gaze offset occasionally (then smooth toward it).
-      // This keeps camera aim stable while still feeling "alive".
-      const maxYawOffset = lerp(0.04, 0.42, lookA) * lerp(1.0, 0.45, stormFocus);
-      this.gazeYawOffsetTarget = (this.rng() * 2 - 1) * maxYawOffset;
-    }
-
-    // Smooth gaze direction (no per-frame RNG jitter)
-    this.gazeYawOffset = lerp(this.gazeYawOffset, this.gazeYawOffsetTarget, clamp(dt * 1.2, 0, 1));
-    const yawLook = this.yaw + this.gazeYawOffset;
-    const gx = Math.cos(yawLook);
-    const gz = Math.sin(yawLook);
-    const gazeTarget = this.tmpV3c.set(0, 0, 0);
-    if (this.lookMode === 'Horizon') {
-      if (stormFocus > 0.001 && typeof inp.windDirTo_rad === 'number') {
-        const waveYaw = inp.windDirTo_rad + Math.PI;
-        const wx = Math.cos(waveYaw);
-        const wz = Math.sin(waveYaw);
-        const mix = lerp(0.0, 0.85, stormFocus);
-        gazeTarget.set(
-          lerp(gx, wx, mix),
-          lerp(0.10, 0.03, mix),
-          lerp(gz, wz, mix)
-        ).normalize();
-      } else {
-        gazeTarget.set(gx, 0.10, gz).normalize();
-      }
-    } else if (this.lookMode === 'Sky') {
-      const interest = inp.interestDir;
-      if (interest && interest.y > 0.08 && stormFocus < 0.15) {
-        gazeTarget.copy(interest).normalize();
-      } else {
-        gazeTarget.set(gx * 0.2, 0.98, gz * 0.2).normalize();
-      }
-    } else {
-      gazeTarget.set(gx * 0.45, -0.62, gz * 0.45).normalize();
-    }
-    this.gazeDir.lerp(gazeTarget, clamp(dt * 2.0, 0, 1)).normalize();
+    const gazeState = updateOtterGaze({
+      dt,
+      storm,
+      otterosity,
+      stormFocus,
+      yaw: this.yaw,
+      rng: this.rng,
+      windDirTo_rad: inp.windDirTo_rad,
+      interestDir: inp.interestDir,
+      lookMode: this.lookMode,
+      lookTimer_s: this.lookTimer_s,
+      gazeYawOffset: this.gazeYawOffset,
+      gazeYawOffsetTarget: this.gazeYawOffsetTarget,
+      gazeDir: this.gazeDir,
+      tmpGazeTarget: this.tmpV3c
+    });
+    this.lookMode = gazeState.lookMode;
+    this.lookTimer_s = gazeState.lookTimer_s;
+    this.gazeYawOffset = gazeState.gazeYawOffset;
+    this.gazeYawOffsetTarget = gazeState.gazeYawOffsetTarget;
 
     // --- Animations ---
     this.updateAnimations(dt, storm, chaos);
@@ -450,176 +380,81 @@ export class SeaOtter {
   }
 
   private updateAnimations(dt: number, storm: number, chaos: number): void {
-    if (!this.mixer) return;
-
-    const move01 = clamp(this.speed_mps / 0.18, 0, 1);
-    const paddleBase = clamp(0.18 + 0.95 * (storm * 0.65 + chaos * 0.6), 0, 1);
-    const paddleW = clamp(paddleBase * (0.25 + 0.75 * move01), 0, 1);
-
-    if (this.paddleAction) {
-      this.paddleAction.setEffectiveWeight(paddleW);
-      this.paddleAction.setEffectiveTimeScale(lerp(0.7, 1.6, paddleW));
-    }
-
-    const underNow = this.isUnderwaterView();
-    if (underNow && !this.wasUnderwater) this.diveAction?.reset().play();
-    else if (!underNow && this.wasUnderwater) this.resurfaceAction?.reset().play();
-    this.wasUnderwater = underNow;
-
-    if (this.blinkTimer_s <= 0) {
-      this.blinkAction?.reset().play();
-      if (this.whiskerTwitchAction && this.rng() < 0.7) {
-        this.whiskerTwitchAction.reset().play();
-      }
-      this.blinkTimer_s = 2.8 + this.rng() * 4.5;
-    }
-
-    this.mixer.update(dt);
-
-    // Paddle impulses (wake/splash boost): 2 pulses per cycle.
-    let impulse = 0;
-    if (this.paddleAction) {
-      const t = (this.paddleAction.time % this.paddlePeriod_s) / this.paddlePeriod_s;
-      const p0 = Math.exp(-Math.pow((t - 0.18) / 0.07, 2.0));
-      const p1 = Math.exp(-Math.pow((t - 0.68) / 0.07, 2.0));
-      impulse = clamp((p0 + p1) * 0.85 * paddleW, 0, 1);
-    }
-    this.paddleImpulse01 = impulse;
+    const result = updateOtterAnimations({
+      dt,
+      storm,
+      chaos,
+      speed_mps: this.speed_mps,
+      paddlePeriod_s: this.paddlePeriod_s,
+      mixer: this.mixer,
+      paddleAction: this.paddleAction,
+      diveAction: this.diveAction,
+      resurfaceAction: this.resurfaceAction,
+      blinkAction: this.blinkAction,
+      whiskerTwitchAction: this.whiskerTwitchAction,
+      paddleImpulse01: this.paddleImpulse01,
+      blinkTimer_s: this.blinkTimer_s,
+      wasUnderwater: this.wasUnderwater,
+      isUnderwaterView: this.isUnderwaterView(),
+      rng: this.rng
+    });
+    this.blinkTimer_s = result.blinkTimer_s;
+    this.wasUnderwater = result.wasUnderwater;
+    this.paddleImpulse01 = result.paddleImpulse01;
   }
 
   private applyStormPose(time_s: number, storm: number, chaos: number): void {
-    const head = this.nodes.head;
-    const tail = this.nodes.tail;
-    const flL = this.nodes.flipperL;
-    const flR = this.nodes.flipperR;
-    if (!head && !tail && !flL && !flR) return;
-
-    const brace = clamp(storm * (0.35 + 0.65 * chaos), 0, 1);
-    if (brace <= 0.001) return;
-
-    const nod = Math.sin(time_s * (2.2 + 1.3 * chaos) + this.stormPhase) * 0.12 * brace;
-    const yaw = Math.sin(time_s * (1.7 + 1.1 * chaos) + this.stormPhase2) * 0.10 * brace;
-    const flap = Math.sin(time_s * (3.1 + 1.6 * chaos) + this.stormPhase2) * 0.18 * brace;
-
-    if (head) {
-      head.rotation.x += nod;
-      head.rotation.y += yaw;
-    }
-    if (tail) {
-      tail.rotation.y += flap * 0.6;
-      tail.rotation.z += flap * 0.45;
-    }
-    if (flL) flL.rotation.z += flap * 0.8;
-    if (flR) flR.rotation.z -= flap * 0.8;
+    applyOtterStormPose({
+      nodes: this.nodes,
+      time_s,
+      storm,
+      chaos,
+      stormPhase: this.stormPhase,
+      stormPhase2: this.stormPhase2
+    });
   }
 
   private applyWetnessToMaterials(w: number): void {
-    if (!this.wetMats.length) return;
-    const ww = clamp(Math.pow(w, 1.18), 0, 1);
-
-    for (const e of this.wetMats) {
-      this.tmpWetCol.copy(e.dryColor).multiplyScalar(0.72);
-      e.mat.color.copy(e.dryColor).lerp(this.tmpWetCol, ww);
-      e.mat.roughness = lerp(e.dryRoughness, 0.38, ww);
-      e.mat.clearcoat = lerp(e.dryClearcoat, 0.62, ww);
-      e.mat.clearcoatRoughness = lerp(e.dryClearcoatRoughness, 0.18, ww);
-    }
-  }
-
-  private urlForMode(mode: OtterAppearanceMode): string {
-    // IMPORTANT: use a *relative* URL so the project works no matter what base path
-    // it is served from (Vite dev server, Vite preview, GitHub Pages, etc.).
-    // A leading "/" breaks when hosted under a sub-path.
-    if (mode === 'Low') return 'models/otter/otter_low.glb';
-    if (mode === 'Medium') return 'models/otter/otter_medium.glb';
-    return 'models/otter/otter_high.glb';
+    applyOtterWetness({ wetMats: this.wetMats, wetness: w, tmpWetCol: this.tmpWetCol });
   }
 
   private preloadAllModels(): void {
-    if (this.preloadStarted) return;
-    this.preloadStarted = true;
-    const modes: OtterAppearanceMode[] = ['Low', 'Medium', 'High'];
-    for (const mode of modes) {
-      const url = this.urlForMode(mode);
-      void loadGltfCached(this.loader, url).catch(() => {
-        // ignore preload errors (main load will surface if needed)
-      });
-    }
+    this.preloadStarted = preloadOtterModels(this.loader, this.preloadStarted);
   }
 
   private loadModel(mode: OtterAppearanceMode, wantFur: boolean): void {
-    const url = this.urlForMode(mode);
+    const url = getOtterModelUrl(mode);
     const ticket = ++this.loadTicket;
 
-    loadGltfCached(this.loader, url)
-      .then((gltf) => {
-        if (ticket !== this.loadTicket) return;
-        this.useLoadedModel(gltf, mode, wantFur);
-      })
-      .catch((err) => {
-        console.warn(`[otter] Failed to load ${url}`, err);
+    loadOtterModel({
+      loader: this.loader,
+      url,
+      ticket,
+      isTicketCurrent: (t) => t === this.loadTicket,
+      onLoaded: (gltf) => this.useLoadedModel(gltf, mode, wantFur),
+      onError: (err, failedUrl) => {
+        console.warn(`[otter] Failed to load ${failedUrl}`, err);
         this.appearanceMode = mode;
         this.furSilhouette = wantFur;
-
-        // If we're running on a device without easy console access (phone/tablet),
-        // put a tiny, non-intrusive hint on-screen so the failure is obvious.
-        try {
-          const id = 'otter-load-error';
-          let el = document.getElementById(id);
-          if (!el) {
-            el = document.createElement('div');
-            el.id = id;
-            el.style.position = 'fixed';
-            el.style.left = '10px';
-            el.style.bottom = '10px';
-            el.style.zIndex = '9999';
-            el.style.maxWidth = 'min(560px, 90vw)';
-            el.style.padding = '10px 12px';
-            el.style.borderRadius = '10px';
-            el.style.background = 'rgba(0,0,0,0.70)';
-            el.style.color = '#fff';
-            el.style.font = '12px/1.35 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif';
-            document.body.appendChild(el);
-          }
-          el.textContent = `Otter model failed to load: ${url}. If you're testing on phone, make sure you're using the dev server (localhost:5173), not opening index.html directly.`;
-        } catch {
-          // ignore
-        }
-      });
+        showOtterLoadError(failedUrl);
+      }
+    });
   }
 
   private useLoadedModel(gltf: GLTF, mode: OtterAppearanceMode, wantFur: boolean): void {
-    // Remove previous model
-    if (this.model) {
-      this.group.remove(this.model);
-      this.model = null;
-    }
-    this.furObj = null;
+    const result = applyOtterModel({
+      gltf,
+      mode,
+      wantFur,
+      group: this.group,
+      prevModel: this.model,
+      wetMats: this.wetMats,
+      wetness: this.wetness,
+      tmpWetCol: this.tmpWetCol
+    });
+    this.model = result.model;
+    this.furObj = result.furObj;
 
-    // Remove placeholder (if any)
-    const ph = this.group.getObjectByName('__placeholder');
-    if (ph) {
-      this.group.remove(ph);
-      disposeObject3D(ph);
-    }
-
-    const scene = gltf.scene;
-    scene.name = 'otterModel';
-
-    // Rotate so its +Z becomes world +X (matches bodyForward basis).
-    scene.rotation.y = -Math.PI / 2;
-
-    // Global scale tweak by LOD.
-    const s = mode === 'Low' ? 0.48 : mode === 'Medium' ? 0.50 : 0.52;
-    scene.scale.setScalar(s);
-
-    this.model = scene;
-    this.group.add(scene);
-
-    this.furObj = scene.getObjectByName('fur') || null;
-    if (this.furObj) this.furObj.visible = wantFur;
-
-    this.applyMaterials(mode);
     this.cacheRigNodes();
     this.setupAnimations();
 
@@ -640,460 +475,25 @@ export class SeaOtter {
     this.nodes.whiskers = this.model.getObjectByName('Whiskers') || undefined;
   }
 
-  private applyMaterials(mode: OtterAppearanceMode): void {
-    if (!this.model) return;
-
-    this.wetMats.length = 0;
-
-    const low = mode === 'Low';
-    const mid = mode === 'Medium';
-    const hi = mode === 'High';
-
-    const userData = (this.model as any).userData ?? ((this.model as any).userData = {});
-    const cached = userData.otterMaterials as {
-      mode: OtterAppearanceMode;
-      furMat: THREE.MeshPhysicalMaterial;
-      furShellMat: THREE.MeshPhysicalMaterial;
-      eyeMat: THREE.MeshStandardMaterial;
-      whiskMat: THREE.MeshStandardMaterial;
-      furDry: { color: THREE.Color; roughness: number; clearcoat: number; clearcoatRoughness: number };
-      furShellDry: { color: THREE.Color; roughness: number; clearcoat: number; clearcoatRoughness: number };
-    } | undefined;
-
-    let furMat: THREE.MeshPhysicalMaterial;
-    let furShellMat: THREE.MeshPhysicalMaterial;
-    let eyeMat: THREE.MeshStandardMaterial;
-    let whiskMat: THREE.MeshStandardMaterial;
-
-    if (cached && cached.mode === mode) {
-      furMat = cached.furMat;
-      furShellMat = cached.furShellMat;
-      eyeMat = cached.eyeMat;
-      whiskMat = cached.whiskMat;
-
-      furMat.color.copy(cached.furDry.color);
-      furMat.roughness = cached.furDry.roughness;
-      furMat.clearcoat = cached.furDry.clearcoat;
-      furMat.clearcoatRoughness = cached.furDry.clearcoatRoughness;
-
-      furShellMat.color.copy(cached.furShellDry.color);
-      furShellMat.roughness = cached.furShellDry.roughness;
-      furShellMat.clearcoat = cached.furShellDry.clearcoat;
-      furShellMat.clearcoatRoughness = cached.furShellDry.clearcoatRoughness;
-    } else {
-      // Slightly brighten the high-quality fur so it doesn't collapse into a
-      // dark blob on mobile HDR/tone-mapped scenes.
-      const furColor = new THREE.Color(low ? '#6a4a2b' : (hi ? '#62462b' : '#5a4028'));
-      const furShellColor = new THREE.Color('#6f5232');
-      const eyeColor = new THREE.Color('#0a0a0a');
-      const whiskerColor = new THREE.Color('#d9d1c5');
-
-      furMat = new THREE.MeshPhysicalMaterial({
-        color: furColor,
-        roughness: low ? 0.96 : 0.92,
-        metalness: 0.0,
-        clearcoat: 0.10,
-        clearcoatRoughness: 0.40,
-        sheen: hi ? 1.0 : 0.75,
-        sheenRoughness: 0.86,
-        sheenColor: new THREE.Color('#caa46a')
-      });
-      furMat.flatShading = low;
-
-      if (mid) {
-        applyFurRimCheat(furMat, new THREE.Color('#e7c89a'), 0.22, 2.2);
-      } else if (hi) {
-        // Subtle rim so the otter stays readable against bright water/sky.
-        applyFurRimCheat(furMat, new THREE.Color('#e7c89a'), 0.12, 2.6);
-      }
-
-      furShellMat = new THREE.MeshPhysicalMaterial({
-        color: furShellColor,
-        roughness: 0.98,
-        metalness: 0.0,
-        clearcoat: 0.05,
-        clearcoatRoughness: 0.55,
-        sheen: 0.9,
-        sheenRoughness: 0.92,
-        sheenColor: new THREE.Color('#caa46a')
-      });
-      furShellMat.flatShading = low;
-
-      eyeMat = new THREE.MeshStandardMaterial({
-        color: eyeColor,
-        roughness: 0.55,
-        metalness: 0.0
-      });
-      (eyeMat as any).flatShading = low;
-
-      whiskMat = new THREE.MeshStandardMaterial({
-        color: whiskerColor,
-        roughness: 0.8,
-        metalness: 0.0
-      });
-
-      userData.otterMaterials = {
-        mode,
-        furMat,
-        furShellMat,
-        eyeMat,
-        whiskMat,
-        furDry: {
-          color: furMat.color.clone(),
-          roughness: furMat.roughness,
-          clearcoat: furMat.clearcoat,
-          clearcoatRoughness: furMat.clearcoatRoughness
-        },
-        furShellDry: {
-          color: furShellMat.color.clone(),
-          roughness: furShellMat.roughness,
-          clearcoat: furShellMat.clearcoat,
-          clearcoatRoughness: furShellMat.clearcoatRoughness
-        }
-      };
-    }
-
-    // Register wetness-driven materials (fur + shell)
-    this.wetMats.push({
-      mat: furMat,
-      dryColor: furMat.color.clone(),
-      dryRoughness: furMat.roughness,
-      dryClearcoat: furMat.clearcoat,
-      dryClearcoatRoughness: furMat.clearcoatRoughness
-    });
-    if (hi) {
-      this.wetMats.push({
-        mat: furShellMat,
-        dryColor: furShellMat.color.clone(),
-        dryRoughness: furShellMat.roughness,
-        dryClearcoat: furShellMat.clearcoat,
-        dryClearcoatRoughness: furShellMat.clearcoatRoughness
-      });
-    }
-
-    // Apply to meshes based on original material names.
-    this.model.traverse((o) => {
-      const anyO = o as any;
-      if (!anyO.isMesh) return;
-      const mat = anyO.material as THREE.Material | THREE.Material[];
-      const m0 = Array.isArray(mat) ? mat[0] : mat;
-      const name = (m0 as any)?.name ?? '';
-
-      if (name === 'Eye') anyO.material = eyeMat;
-      else if (name === 'Whisker') anyO.material = whiskMat;
-      else if (name === 'FurShell') anyO.material = furShellMat;
-      else anyO.material = furMat;
-    });
-
-    // Apply current wetness immediately.
-    this.applyWetnessToMaterials(this.wetness);
-  }
-
   private setupAnimations(): void {
     if (!this.model) return;
-
-    // Tear down previous mixer bindings.
-    if (this.mixer) {
-      try {
-        this.mixer.stopAllAction();
-        if (this.mixerRoot) this.mixer.uncacheRoot(this.mixerRoot);
-      } catch {
-        // ignore
-      }
-    }
-
-    this.mixer = new THREE.AnimationMixer(this.model);
-    this.mixerRoot = this.model;
-    this.idleAction = null;
-    this.paddleAction = null;
-    this.diveAction = null;
-    this.resurfaceAction = null;
-    this.blinkAction = null;
-    this.whiskerTwitchAction = null;
-
-    const body = this.nodes.body;
-    const head = this.nodes.head;
-    const tail = this.nodes.tail;
-    const flL = this.nodes.flipperL;
-    const flR = this.nodes.flipperR;
-    const eyeL = this.nodes.eyeL;
-    const eyeR = this.nodes.eyeR;
-    const whiskers = this.nodes.whiskers;
-
-    const clips: THREE.AnimationClip[] = [];
-
-    // Idle
-    {
-      const tracks: THREE.KeyframeTrack[] = [];
-      const len = 6.0;
-      const t = [0, 1.5, 3.0, 4.5, 6.0];
-
-      if (body) {
-        const s0 = [1, 1, 1];
-        const s1 = [1.02, 0.985, 1.02];
-        const s2 = [0.99, 1.01, 0.99];
-        tracks.push(new THREE.VectorKeyframeTrack(`${body.name}.scale`, t, [...s0, ...s1, ...s2, ...s1, ...s0]));
-      }
-
-      if (head) {
-        const q0 = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.02, 0.0, 0.0, 'YXZ'));
-        const q1 = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.03, 0.08, 0.0, 'YXZ'));
-        const q2 = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.01, -0.06, 0.0, 'YXZ'));
-        tracks.push(
-          new THREE.QuaternionKeyframeTrack(
-            `${head.name}.quaternion`,
-            t,
-            [
-              q0.x,
-              q0.y,
-              q0.z,
-              q0.w,
-              q1.x,
-              q1.y,
-              q1.z,
-              q1.w,
-              q2.x,
-              q2.y,
-              q2.z,
-              q2.w,
-              q1.x,
-              q1.y,
-              q1.z,
-              q1.w,
-              q0.x,
-              q0.y,
-              q0.z,
-              q0.w
-            ]
-          )
-        );
-      }
-
-      if (tail) {
-        const qa = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.0, 0.0, 0.06));
-        const qb = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.0, 0.0, -0.06));
-        tracks.push(
-          new THREE.QuaternionKeyframeTrack(
-            `${tail.name}.quaternion`,
-            [0, 3, 6],
-            [qa.x, qa.y, qa.z, qa.w, qb.x, qb.y, qb.z, qb.w, qa.x, qa.y, qa.z, qa.w]
-          )
-        );
-      }
-
-      if (tracks.length) clips.push(new THREE.AnimationClip('Idle', len, tracks));
-    }
-
-    // Paddle
-    {
-      const tracks: THREE.KeyframeTrack[] = [];
-      const len = this.paddlePeriod_s;
-      const t = [0, len * 0.25, len * 0.5, len * 0.75, len];
-      const flapA = 0.55;
-      const flapB = -0.35;
-
-      if (flL) {
-        const qa = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.0, 0.0, flapA));
-        const qb = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.0, 0.0, flapB));
-        tracks.push(
-          new THREE.QuaternionKeyframeTrack(
-            `${flL.name}.quaternion`,
-            t,
-            [
-              qa.x,
-              qa.y,
-              qa.z,
-              qa.w,
-              qb.x,
-              qb.y,
-              qb.z,
-              qb.w,
-              qa.x,
-              qa.y,
-              qa.z,
-              qa.w,
-              qb.x,
-              qb.y,
-              qb.z,
-              qb.w,
-              qa.x,
-              qa.y,
-              qa.z,
-              qa.w
-            ]
-          )
-        );
-      }
-
-      if (flR) {
-        const qa = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.0, 0.0, -flapA));
-        const qb = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.0, 0.0, -flapB));
-        tracks.push(
-          new THREE.QuaternionKeyframeTrack(
-            `${flR.name}.quaternion`,
-            t,
-            [
-              qa.x,
-              qa.y,
-              qa.z,
-              qa.w,
-              qb.x,
-              qb.y,
-              qb.z,
-              qb.w,
-              qa.x,
-              qa.y,
-              qa.z,
-              qa.w,
-              qb.x,
-              qb.y,
-              qb.z,
-              qb.w,
-              qa.x,
-              qa.y,
-              qa.z,
-              qa.w
-            ]
-          )
-        );
-      }
-
-      if (tracks.length) clips.push(new THREE.AnimationClip('Paddle', len, tracks));
-    }
-
-    // Dive / Resurface cue (head pitch)
-    if (head) {
-      const len = 1.0;
-      const qA = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.02, 0.0, 0.0, 'YXZ'));
-      const qB = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.38, 0.0, 0.0, 'YXZ'));
-      clips.push(
-        new THREE.AnimationClip('Dive', len, [
-          new THREE.QuaternionKeyframeTrack(`${head.name}.quaternion`, [0, len], [qA.x, qA.y, qA.z, qA.w, qB.x, qB.y, qB.z, qB.w])
-        ])
-      );
-      clips.push(
-        new THREE.AnimationClip('Resurface', len, [
-          new THREE.QuaternionKeyframeTrack(`${head.name}.quaternion`, [0, len], [qB.x, qB.y, qB.z, qB.w, qA.x, qA.y, qA.z, qA.w])
-        ])
-      );
-    }
-
-    // Blink
-    if (eyeL && eyeR) {
-      const len = 0.18;
-      const open = eyeL.scale;
-      const closedY = Math.max(0.001, open.y * 0.08);
-      const t = [0, 0.06, 0.12, 0.18];
-      const vOpen = [open.x, open.y, open.z];
-      const vClosed = [open.x, closedY, open.z];
-      clips.push(
-        new THREE.AnimationClip('Blink', len, [
-          new THREE.VectorKeyframeTrack(`${eyeL.name}.scale`, t, [...vOpen, ...vClosed, ...vOpen, ...vOpen]),
-          new THREE.VectorKeyframeTrack(`${eyeR.name}.scale`, t, [...vOpen, ...vClosed, ...vOpen, ...vOpen])
-        ])
-      );
-    }
-
-    // Whisker twitch (optional)
-    if (whiskers) {
-      const len = 0.55;
-      const qa = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.0, 0.0, 0.02));
-      const qb = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.0, 0.0, -0.04));
-      clips.push(
-        new THREE.AnimationClip('WhiskerTwitch', len, [
-          new THREE.QuaternionKeyframeTrack(
-            `${whiskers.name}.quaternion`,
-            [0, len * 0.5, len],
-            [qa.x, qa.y, qa.z, qa.w, qb.x, qb.y, qb.z, qb.w, qa.x, qa.y, qa.z, qa.w]
-          )
-        ])
-      );
-    }
-
-    // Bind actions
-    for (const c of clips) {
-      const a = this.mixer.clipAction(c);
-      if (c.name === 'Idle') {
-        a.setLoop(THREE.LoopRepeat, Infinity);
-        a.play();
-        this.idleAction = a;
-      } else if (c.name === 'Paddle') {
-        a.setLoop(THREE.LoopRepeat, Infinity);
-        a.enabled = true;
-        a.play();
-        a.setEffectiveWeight(0.0);
-        this.paddleAction = a;
-      } else if (c.name === 'Dive') {
-        a.setLoop(THREE.LoopOnce, 1);
-        a.clampWhenFinished = true;
-        a.enabled = true;
-        this.diveAction = a;
-      } else if (c.name === 'Resurface') {
-        a.setLoop(THREE.LoopOnce, 1);
-        a.clampWhenFinished = true;
-        a.enabled = true;
-        this.resurfaceAction = a;
-      } else if (c.name === 'Blink') {
-        a.setLoop(THREE.LoopOnce, 1);
-        a.clampWhenFinished = true;
-        a.enabled = true;
-        this.blinkAction = a;
-      } else if (c.name === 'WhiskerTwitch') {
-        a.setLoop(THREE.LoopOnce, 1);
-        a.clampWhenFinished = true;
-        a.enabled = true;
-        this.whiskerTwitchAction = a;
-      }
-    }
-
-    this.blinkTimer_s = 2.5 + this.rng() * 3.5;
-    this.wasUnderwater = false;
+    const result = setupOtterAnimations({
+      model: this.model,
+      nodes: this.nodes,
+      paddlePeriod_s: this.paddlePeriod_s,
+      rng: this.rng,
+      prevMixer: this.mixer,
+      prevMixerRoot: this.mixerRoot
+    });
+    this.mixer = result.mixer;
+    this.mixerRoot = result.mixerRoot;
+    this.idleAction = result.idleAction;
+    this.paddleAction = result.paddleAction;
+    this.diveAction = result.diveAction;
+    this.resurfaceAction = result.resurfaceAction;
+    this.blinkAction = result.blinkAction;
+    this.whiskerTwitchAction = result.whiskerTwitchAction;
+    this.blinkTimer_s = result.blinkTimer_s;
+    this.wasUnderwater = result.wasUnderwater;
   }
-}
-
-function disposeObject3D(root: THREE.Object3D): void {
-  root.traverse((o) => {
-    const anyO = o as any;
-    if (anyO.geometry && typeof anyO.geometry.dispose === 'function') {
-      anyO.geometry.dispose();
-    }
-    const mat = anyO.material;
-    if (Array.isArray(mat)) {
-      for (const m of mat) {
-        if (m && typeof m.dispose === 'function') m.dispose();
-      }
-    } else if (mat && typeof mat.dispose === 'function') {
-      mat.dispose();
-    }
-  });
-}
-
-function applyFurRimCheat(
-  mat: THREE.MeshPhysicalMaterial,
-  rimColor: THREE.Color,
-  strength: number,
-  power: number
-): void {
-  mat.onBeforeCompile = (shader) => {
-    shader.uniforms.u_rimColor = { value: rimColor };
-    shader.uniforms.u_rimStrength = { value: strength };
-    shader.uniforms.u_rimPower = { value: power };
-
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <common>',
-      `#include <common>
-       uniform vec3 u_rimColor;
-       uniform float u_rimStrength;
-       uniform float u_rimPower;`
-    );
-
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <opaque_fragment>',
-      `float _rim = pow(1.0 - saturate(dot(normalize(normal), normalize(vViewPosition))), u_rimPower);
-       outgoingLight += u_rimColor * (u_rimStrength * _rim);
-       #include <opaque_fragment>`
-    );
-  };
-
-  mat.customProgramCacheKey = () => `otter_fur_rim_${strength.toFixed(3)}_${power.toFixed(3)}`;
 }
