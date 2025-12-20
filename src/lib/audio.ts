@@ -170,7 +170,7 @@ export class OceanAudio {
     this.master.gain.value = clamp(v, 0, 1.2);
   }
 
-  public update(dt_s: number, sea: { U10: number; Hs: number; rain: number }): void {
+  public update(dt_s: number, sea: { U10: number; Hs: number; rain: number; rainImpact?: number; splashImpact?: number }): void {
     if (!this.ctx || !this.windGain || !this.waveGain || !this.hissGain || !this.rainGain) return;
 
     // Targets from sea state
@@ -181,12 +181,16 @@ export class OceanAudio {
     const waveT = clamp(Math.pow(H / 3.0, 1.15), 0, 1);
     const hissT = clamp((U / 25) * (H / 5), 0, 1);
     const rainT = clamp(sea.rain, 0, 1);
+    const rainImpact01 = clamp((sea.rainImpact ?? 0) / 24, 0, 1);
+    const splashImpact01 = clamp((sea.splashImpact ?? 0) / 26, 0, 1);
+    const rainTarget = clamp(rainT + rainImpact01 * 0.25, 0, 1);
+    const hissTarget = clamp(hissT + splashImpact01 * 0.35, 0, 1);
 
     const k = clamp(dt_s * 1.6, 0, 1);
     this.currentWind = lerp(this.currentWind, windT * 0.45, k);
     this.currentWave = lerp(this.currentWave, waveT * 0.35, k);
-    this.currentHiss = lerp(this.currentHiss, hissT * 0.25, k);
-    this.currentRain = lerp(this.currentRain, rainT * 0.55, k);
+    this.currentHiss = lerp(this.currentHiss, hissTarget * 0.25, k);
+    this.currentRain = lerp(this.currentRain, rainTarget * 0.55, k);
 
     this.windGain.gain.value = this.currentWind;
     this.waveGain.gain.value = this.currentWave;

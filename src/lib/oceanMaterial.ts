@@ -6,6 +6,10 @@ import { makeMicroNormalSet } from './microNormals';
 import { applyOceanMaterialShader } from './oceanMaterialShader';
 
 export const MAX_WAVES = 32;
+const MAX_IMPACT_PINGS = 32;
+const IMPACT_FADE_S = 0.5;
+const IMPACT_RADIUS_M = 0.35;
+const IMPACT_SMEAR = 0.04;
 
 export interface OceanMaterialParams {
   /** Base water color (deep water). */
@@ -103,6 +107,17 @@ export interface OceanUniforms {
   /** World-space coverage size of the foam map (meters). */
   u_foamWorldSize: { value: number };
 
+  /** Droplet impact decals (x, z, birth time, strength). */
+  u_impactA: { value: THREE.Vector4[] };
+  /** Non-zero when impacts are active (gates shader work). */
+  u_impactCount: { value: number };
+  /** Base radius of impact pings (meters). */
+  u_impactRadius: { value: number };
+  /** Fade time in seconds. */
+  u_impactFade: { value: number };
+  /** Smear scale (meters per second per m/s of wind). */
+  u_impactSmear: { value: number };
+
   /** Wind velocity at sea surface (XZ, m/s). Used for micro ripples / capillary waves. */
   u_wind: { value: THREE.Vector2 };
 
@@ -185,6 +200,10 @@ export class OceanMaterial {
   public readonly uniforms: OceanUniforms;
   private readonly baseRoughness: number;
   private windSeaEnergyRatio = 0;
+  private readonly impactData: THREE.Vector4[];
+  private impactWrite = 0;
+  private impactCount = 0;
+  private lastImpactTime_s = -1;
 
   constructor(params: OceanMaterialParams) {
     // Prepare fixed-size arrays
@@ -194,6 +213,11 @@ export class OceanMaterial {
       waveA.push(new THREE.Vector4(1, 0, 0, 1)); // dirX, dirZ, A, k
       waveB.push(new THREE.Vector4(0, 0, 0, 0)); // omega, phase, Q, band info
     }
+    const impactA: THREE.Vector4[] = [];
+    for (let i = 0; i < MAX_IMPACT_PINGS; i++) {
+      impactA.push(new THREE.Vector4(0, 0, -9999, 0));
+    }
+    this.impactData = impactA;
 
     this.uniforms = {
       u_time: { value: 0 },
@@ -247,6 +271,12 @@ export class OceanMaterial {
       u_foamCenter: { value: new THREE.Vector2(0, 0) },
       u_foamWorldSize: { value: 240.0 },
 
+      u_impactA: { value: impactA },
+      u_impactCount: { value: 0 },
+      u_impactRadius: { value: IMPACT_RADIUS_M },
+      u_impactFade: { value: IMPACT_FADE_S },
+      u_impactSmear: { value: IMPACT_SMEAR },
+
       // Milestone #3: micro-normal detail (ripples / capillary)
       u_wind: { value: new THREE.Vector2(0, 0) },
 
@@ -289,11 +319,11 @@ export class OceanMaterial {
     this.setWaves(params.waves);
 
     this.material.onBeforeCompile = (shader: THREE.WebGLProgramParametersWithUniforms) => {
-      applyOceanMaterialShader(shader, this.uniforms, MAX_WAVES);
+      applyOceanMaterialShader(shader, this.uniforms, MAX_WAVES, MAX_IMPACT_PINGS);
       this.shader = shader;
     };
 
-    this.material.customProgramCacheKey = () => 'OceanMaterial_v12_lightning';
+    this.material.customProgramCacheKey = () => 'OceanMaterial_v13_impacts';
 
     this.setWaves(params.waves);
   }
@@ -332,6 +362,15 @@ export class OceanMaterial {
       }
     }
     this.windSeaEnergyRatio = totalEnergy > 1e-8 ? windEnergy / totalEnergy : 0;
+  }
+
+  /** Add a droplet impact ping (world XZ). */
+  public addImpactPing(x: number, z: number, time_s: number, strength = 1.0): void {
+    const idx = this.impactWrite++ % MAX_IMPACT_PINGS;
+    this.impactData[idx].set(x, z, time_s, clamp(strength, 0.0, 1.0));
+    if (this.impactCount < MAX_IMPACT_PINGS) this.impactCount += 1;
+    this.lastImpactTime_s = time_s;
+    this.uniforms.u_impactCount.value = this.impactCount;
   }
 
   public update(dt_s: number, opts: {
@@ -448,6 +487,10 @@ export class OceanMaterial {
     this.uniforms.u_lightningDir.value.copy(opts.lightningDir).normalize();
     this.uniforms.u_lightningColor.value.copy(opts.lightningColor);
     this.uniforms.u_lightningIntensity.value = clamp(opts.lightningIntensity, 0, 1.5);
+
+    const impactFade = this.uniforms.u_impactFade.value;
+    const impactsActive = this.lastImpactTime_s >= 0 && (opts.time_s - this.lastImpactTime_s) <= impactFade;
+    this.uniforms.u_impactCount.value = impactsActive ? this.impactCount : 0;
 
     // dt_s reserved for future temporal smoothing.
     void dt_s;

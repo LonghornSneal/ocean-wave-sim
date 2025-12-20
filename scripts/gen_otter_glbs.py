@@ -20,10 +20,9 @@ import json
 import math
 import os
 import struct
-from dataclasses import dataclass
-from typing import List, Tuple
-
-import numpy as np
+from array import array
+import sys
+from typing import List
 
 
 def _pad4(b: bytes, pad_byte: bytes = b"\x00") -> bytes:
@@ -43,10 +42,10 @@ def _pad4(b: bytes, pad_byte: bytes = b"\x00") -> bytes:
 
 
 def uv_sphere(lat_seg: int, lon_seg: int, radius: float = 1.0):
-    verts = []
-    norms = []
-    uvs = []
-    idx = []
+    verts: list[tuple[float, float, float]] = []
+    norms: list[tuple[float, float, float]] = []
+    uvs: list[tuple[float, float]] = []
+    idx: list[int] = []
     for i in range(lat_seg + 1):
         v = i / lat_seg
         theta = v * math.pi
@@ -69,19 +68,14 @@ def uv_sphere(lat_seg: int, lon_seg: int, radius: float = 1.0):
             d = b + 1
             idx.extend([a, b, c, c, b, d])
 
-    return (
-        np.array(verts, dtype=np.float32),
-        np.array(norms, dtype=np.float32),
-        np.array(uvs, dtype=np.float32),
-        np.array(idx, dtype=np.uint16),
-    )
+    return (verts, norms, uvs, idx)
 
 
 def cylinder_y(rad_seg: int = 8, height: float = 1.0, radius: float = 1.0):
-    verts = []
-    norms = []
-    uvs = []
-    idx = []
+    verts: list[tuple[float, float, float]] = []
+    norms: list[tuple[float, float, float]] = []
+    uvs: list[tuple[float, float]] = []
+    idx: list[int] = []
     for j in range(rad_seg + 1):
         u = j / rad_seg
         phi = u * 2 * math.pi
@@ -100,26 +94,96 @@ def cylinder_y(rad_seg: int = 8, height: float = 1.0, radius: float = 1.0):
         d = a + 3
         idx.extend([a, b, c, b, d, c])
 
-    return (
-        np.array(verts, dtype=np.float32),
-        np.array(norms, dtype=np.float32),
-        np.array(uvs, dtype=np.float32),
-        np.array(idx, dtype=np.uint16),
-    )
+    return (verts, norms, uvs, idx)
 
 
-def harmonic_jitter(verts: np.ndarray, norms: np.ndarray, amount: float, freq: float, seed: float):
-    out = verts.copy()
-    for i in range(len(verts)):
-        x, y, z = verts[i]
+def harmonic_jitter(verts: list[tuple[float, float, float]], norms: list[tuple[float, float, float]], amount: float, freq: float, seed: float):
+    out: list[tuple[float, float, float]] = []
+    for (x, y, z), (nx, ny, nz) in zip(verts, norms):
         t = (
             math.sin((x * freq + seed) * 1.7) * math.cos((y * freq - seed) * 1.3)
             + math.sin((z * freq * 0.9 + seed * 2.0) * 1.9) * math.cos((x * freq * 0.8 - seed) * 1.1)
         )
         f = t * 0.5 + 0.5
         a = amount * (0.35 + 0.65 * f)
-        out[i] += norms[i] * a
+        out.append((x + nx * a, y + ny * a, z + nz * a))
     return out
+
+
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return lo if v < lo else hi if v > hi else v
+
+
+def morph_breath(verts: list[tuple[float, float, float]], norms: list[tuple[float, float, float]], amount: float = 0.04):
+    out: list[tuple[float, float, float]] = []
+    for (x, y, z), (nx, ny, nz) in zip(verts, norms):
+        t = _clamp((y + 0.2) / 1.2, 0.0, 1.0)
+        w = 0.35 + 0.65 * t
+        out.append((x + nx * amount * w, y + ny * amount * w, z + nz * amount * w))
+    return out
+
+
+def morph_blink(verts: list[tuple[float, float, float]], closed_scale: float = 0.08):
+    out: list[tuple[float, float, float]] = []
+    for x, y, z in verts:
+        out.append((x, y * closed_scale, z))
+    return out
+
+
+def morph_twitch(verts: list[tuple[float, float, float]], bend: float = 0.22):
+    out: list[tuple[float, float, float]] = []
+    for x, y, z in verts:
+        t = _clamp((y + 0.5), 0.0, 1.0)
+        w = t * t
+        out.append((x + bend * w, y, z))
+    return out
+
+
+def _flatten(items: list[tuple[float, ...]]) -> list[float]:
+    out: list[float] = []
+    for tup in items:
+        out.extend(tup)
+    return out
+
+
+def _min_max_vec3(items: list[tuple[float, float, float]]):
+    minv = [float("inf"), float("inf"), float("inf")]
+    maxv = [-float("inf"), -float("inf"), -float("inf")]
+    for x, y, z in items:
+        if x < minv[0]:
+            minv[0] = x
+        if y < minv[1]:
+            minv[1] = y
+        if z < minv[2]:
+            minv[2] = z
+        if x > maxv[0]:
+            maxv[0] = x
+        if y > maxv[1]:
+            maxv[1] = y
+        if z > maxv[2]:
+            maxv[2] = z
+    return minv, maxv
+
+
+def _delta_vec3(base: list[tuple[float, float, float]], target: list[tuple[float, float, float]]):
+    out: list[tuple[float, float, float]] = []
+    for (x, y, z), (tx, ty, tz) in zip(base, target):
+        out.append((tx - x, ty - y, tz - z))
+    return out
+
+
+def _pack_f32(values: list[float]) -> bytes:
+    arr = array("f", values)
+    if sys.byteorder != "little":
+        arr.byteswap()
+    return arr.tobytes()
+
+
+def _pack_u16(values: list[int]) -> bytes:
+    arr = array("H", values)
+    if sys.byteorder != "little":
+        arr.byteswap()
+    return arr.tobytes()
 
 
 class GLBBuilder:
@@ -176,19 +240,21 @@ class GLBBuilder:
         self.json["accessors"].append(acc)
         return len(self.json["accessors"]) - 1
 
-    def add_mesh(self, name, pos_acc, nrm_acc, uv_acc, idx_acc, material_idx):
-        self.json["meshes"].append(
-            {
-                "name": name,
-                "primitives": [
-                    {
-                        "attributes": {"POSITION": pos_acc, "NORMAL": nrm_acc, "TEXCOORD_0": uv_acc},
-                        "indices": idx_acc,
-                        "material": material_idx,
-                    }
-                ],
-            }
-        )
+    def add_mesh(self, name, pos_acc, nrm_acc, uv_acc, idx_acc, material_idx, targets=None, target_names=None):
+        prim = {
+            "attributes": {"POSITION": pos_acc, "NORMAL": nrm_acc, "TEXCOORD_0": uv_acc},
+            "indices": idx_acc,
+            "material": material_idx,
+        }
+        if targets:
+            prim["targets"] = targets
+
+        mesh = {"name": name, "primitives": [prim]}
+        if target_names:
+            mesh["extras"] = {"targetNames": target_names}
+            mesh["weights"] = [0.0 for _ in target_names]
+
+        self.json["meshes"].append(mesh)
         return len(self.json["meshes"]) - 1
 
     def add_node(self, name, mesh=None, children=None, translation=None, rotation=None, scale=None):
@@ -224,21 +290,37 @@ class GLBBuilder:
             f.write(chunk1)
 
 
-def add_geometry(builder: GLBBuilder, verts, norms, uvs, indices, name, material_idx):
-    pos_bv = builder.add_buffer_view(verts.astype("<f4").tobytes(), target=34962)
-    nrm_bv = builder.add_buffer_view(norms.astype("<f4").tobytes(), target=34962)
-    uv_bv = builder.add_buffer_view(uvs.astype("<f4").tobytes(), target=34962)
-    idx_bv = builder.add_buffer_view(indices.astype("<u2").tobytes(), target=34963)
+def add_geometry(builder: GLBBuilder, verts, norms, uvs, indices, name, material_idx, morph_targets=None):
+    pos_flat = _flatten(verts)
+    nrm_flat = _flatten(norms)
+    uv_flat = _flatten(uvs)
+    pos_bv = builder.add_buffer_view(_pack_f32(pos_flat), target=34962)
+    nrm_bv = builder.add_buffer_view(_pack_f32(nrm_flat), target=34962)
+    uv_bv = builder.add_buffer_view(_pack_f32(uv_flat), target=34962)
+    idx_bv = builder.add_buffer_view(_pack_u16(indices), target=34963)
 
-    pos_min = verts.min(axis=0).tolist()
-    pos_max = verts.max(axis=0).tolist()
+    pos_min, pos_max = _min_max_vec3(verts)
 
     pos_acc = builder.add_accessor(pos_bv, 5126, len(verts), "VEC3", minv=pos_min, maxv=pos_max)
     nrm_acc = builder.add_accessor(nrm_bv, 5126, len(norms), "VEC3")
     uv_acc = builder.add_accessor(uv_bv, 5126, len(uvs), "VEC2")
-    idx_acc = builder.add_accessor(idx_bv, 5123, len(indices), "SCALAR", minv=[int(indices.min())], maxv=[int(indices.max())])
+    idx_min = min(indices) if indices else 0
+    idx_max = max(indices) if indices else 0
+    idx_acc = builder.add_accessor(idx_bv, 5123, len(indices), "SCALAR", minv=[int(idx_min)], maxv=[int(idx_max)])
 
-    return builder.add_mesh(name, pos_acc, nrm_acc, uv_acc, idx_acc, material_idx)
+    targets = None
+    target_names = None
+    if morph_targets:
+        targets = []
+        target_names = []
+        for target in morph_targets:
+            target_names.append(target["name"])
+            delta = _delta_vec3(verts, target["positions"])
+            t_bv = builder.add_buffer_view(_pack_f32(_flatten(delta)), target=34962)
+            t_acc = builder.add_accessor(t_bv, 5126, len(verts), "VEC3")
+            targets.append({"POSITION": t_acc})
+
+    return builder.add_mesh(name, pos_acc, nrm_acc, uv_acc, idx_acc, material_idx, targets=targets, target_names=target_names)
 
 
 def generate_otter_glb(mode: str, out_path: str):
@@ -261,18 +343,59 @@ def generate_otter_glb(mode: str, out_path: str):
         lat, lon = 18, 22
 
     s_v, s_n, s_uv, s_i = uv_sphere(lat, lon)
+    breath_v = morph_breath(s_v, s_n, amount=0.04)
     sphere_mesh = add_geometry(b, s_v, s_n, s_uv, s_i, "SphereFur", fur_mat)
+    sphere_breath_mesh = add_geometry(
+        b,
+        s_v,
+        s_n,
+        s_uv,
+        s_i,
+        "SphereFurBreath",
+        fur_mat,
+        morph_targets=[{"name": "Breath", "positions": breath_v}],
+    )
 
     e_v, e_n, e_uv, e_i = uv_sphere(6, 8)
-    eye_mesh = add_geometry(b, e_v, e_n, e_uv, e_i, "SphereEye", eye_mat)
+    blink_v = morph_blink(e_v, closed_scale=0.08)
+    eye_mesh = add_geometry(
+        b,
+        e_v,
+        e_n,
+        e_uv,
+        e_i,
+        "SphereEye",
+        eye_mat,
+        morph_targets=[{"name": "Blink", "positions": blink_v}],
+    )
 
     c_v, c_n, c_uv, c_i = cylinder_y(8)
-    cyl_mesh = add_geometry(b, c_v, c_n, c_uv, c_i, "CylinderWhisker", whisk_mat)
+    twitch_v = morph_twitch(c_v, bend=0.22)
+    cyl_mesh = add_geometry(
+        b,
+        c_v,
+        c_n,
+        c_uv,
+        c_i,
+        "CylinderWhisker",
+        whisk_mat,
+        morph_targets=[{"name": "Twitch", "positions": twitch_v}],
+    )
 
     shell_mesh = None
     if mode == "high" and shell_mat is not None:
         shell_v = harmonic_jitter(s_v, s_n, amount=0.10, freq=3.8, seed=1.23)
-        shell_mesh = add_geometry(b, shell_v, s_n, s_uv, s_i, "SphereShell", shell_mat)
+        shell_breath_v = morph_breath(shell_v, s_n, amount=0.04)
+        shell_mesh = add_geometry(
+            b,
+            shell_v,
+            s_n,
+            s_uv,
+            s_i,
+            "SphereShell",
+            shell_mat,
+            morph_targets=[{"name": "Breath", "positions": shell_breath_v}],
+        )
 
     # Root
     root_idx = b.add_node("OtterRig", children=[])
@@ -280,13 +403,13 @@ def generate_otter_glb(mode: str, out_path: str):
     # Body base + back hump
     body_scale = [0.60, 0.80, 0.46] if mode != "high" else [0.62, 0.84, 0.48]
     body_y = 0.52
-    body_idx = b.add_node("Body", mesh=sphere_mesh, translation=[0, body_y, 0], scale=body_scale)
+    body_idx = b.add_node("Body", mesh=sphere_breath_mesh, translation=[0, body_y, 0], scale=body_scale)
 
     back_scale = [0.78, 0.44, 0.60] if mode != "high" else [0.82, 0.46, 0.64]
-    back_idx = b.add_node("Back", mesh=sphere_mesh, translation=[0, 0.74, -0.08], scale=back_scale)
+    back_idx = b.add_node("Back", mesh=sphere_breath_mesh, translation=[0, 0.74, -0.08], scale=back_scale)
 
     head_scale = 0.40 if mode == "low" else (0.41 if mode == "medium" else 0.42)
-    head_idx = b.add_node("Head", mesh=sphere_mesh, translation=[0, 0.86, 0.15], scale=[head_scale] * 3)
+    head_idx = b.add_node("Head", mesh=sphere_breath_mesh, translation=[0, 0.86, 0.15], scale=[head_scale] * 3)
 
     ear_scale = 0.11 if mode == "low" else (0.10 if mode == "medium" else 0.09)
     earL_idx = b.add_node("EarL", mesh=sphere_mesh, translation=[-0.27, 0.23, 0.00], scale=[ear_scale, ear_scale * 0.9, ear_scale])

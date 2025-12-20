@@ -9,13 +9,22 @@ export interface WetMaterialEntry {
   wetRoughness: number;
   dryClearcoat: number;
   dryClearcoatRoughness: number;
+  rainUniforms?: OtterRainUniforms;
 }
 
 type OtterMapMaterial = THREE.MeshStandardMaterial & Partial<THREE.MeshPhysicalMaterial>;
 
+type OtterRainUniforms = {
+  u_rainPulse: { value: number };
+  u_rainTime: { value: number };
+};
+
+type OtterRimSettings = { color: THREE.Color; strength: number; power: number } | null;
+
 const WET_COLOR_SCALE = 0.62;
 const WET_CLEARCOAT_TARGET = 0.70;
 const WET_CLEARCOAT_ROUGHNESS_TARGET = 0.12;
+const RIM_COLOR = new THREE.Color('#e7c89a');
 
 function ensureSrgbTexture(texture: THREE.Texture | null | undefined): void {
   if (!texture) return;
@@ -134,6 +143,9 @@ export function applyOtterMaterials(opts: {
   const low = mode === 'Low';
   const mid = mode === 'Medium';
   const hi = mode === 'High';
+  const rimSettings: OtterRimSettings = mid
+    ? { color: RIM_COLOR, strength: 0.22, power: 2.2 }
+    : (hi ? { color: RIM_COLOR, strength: 0.12, power: 2.6 } : null);
 
   const userData = (model as any).userData ?? ((model as any).userData = {});
   const cached = userData.otterMaterials as {
@@ -199,13 +211,6 @@ export function applyOtterMaterials(opts: {
     furMat.anisotropy = Math.max(furSource?.anisotropy ?? 0, low ? 0.0 : (hi ? 0.25 : 0.2));
     if (furSource?.anisotropyRotation !== undefined) furMat.anisotropyRotation = furSource.anisotropyRotation;
 
-    if (mid) {
-      applyFurRimCheat(furMat, new THREE.Color('#e7c89a'), 0.22, 2.2);
-    } else if (hi) {
-      // Subtle rim so the otter stays readable against bright water/sky.
-      applyFurRimCheat(furMat, new THREE.Color('#e7c89a'), 0.12, 2.6);
-    }
-
     furShellMat = new THREE.MeshPhysicalMaterial({
       color: furShellColor,
       roughness: 0.90,
@@ -261,13 +266,17 @@ export function applyOtterMaterials(opts: {
   }
 
   // Register wetness-driven materials (fur + shell)
+  const furRain = applyOtterFurShader(furMat, rimSettings);
+  const furShellRain = hi ? applyOtterFurShader(furShellMat, null) : null;
+
   wetMats.push({
     mat: furMat,
     dryColor: furMat.color.clone(),
     dryRoughness: furMat.roughness,
     wetRoughness: low ? 0.30 : 0.26,
     dryClearcoat: furMat.clearcoat,
-    dryClearcoatRoughness: furMat.clearcoatRoughness
+    dryClearcoatRoughness: furMat.clearcoatRoughness,
+    rainUniforms: furRain
   });
   if (hi) {
     wetMats.push({
@@ -276,7 +285,8 @@ export function applyOtterMaterials(opts: {
       dryRoughness: furShellMat.roughness,
       wetRoughness: 0.32,
       dryClearcoat: furShellMat.clearcoat,
-      dryClearcoatRoughness: furShellMat.clearcoatRoughness
+      dryClearcoatRoughness: furShellMat.clearcoatRoughness,
+      rainUniforms: furShellRain ?? undefined
     });
   }
 
@@ -316,32 +326,81 @@ export function applyOtterWetness(opts: {
   }
 }
 
-function applyFurRimCheat(
+export function applyOtterRainFx(opts: {
+  wetMats: WetMaterialEntry[];
+  rainPulse: number;
+  time_s: number;
+}): void {
+  const { wetMats, rainPulse, time_s } = opts;
+  if (!wetMats.length) return;
+  const pulse = clamp(rainPulse, 0, 1);
+
+  for (const e of wetMats) {
+    if (!e.rainUniforms) continue;
+    e.rainUniforms.u_rainPulse.value = pulse;
+    e.rainUniforms.u_rainTime.value = time_s;
+  }
+}
+
+function applyOtterFurShader(
   mat: THREE.MeshPhysicalMaterial,
-  rimColor: THREE.Color,
-  strength: number,
-  power: number
-): void {
+  rim: OtterRimSettings
+): OtterRainUniforms {
+  const rainUniforms: OtterRainUniforms = {
+    u_rainPulse: { value: 0 },
+    u_rainTime: { value: 0 }
+  };
+
   mat.onBeforeCompile = (shader: THREE.WebGLProgramParametersWithUniforms) => {
-    shader.uniforms.u_rimColor = { value: rimColor };
-    shader.uniforms.u_rimStrength = { value: strength };
-    shader.uniforms.u_rimPower = { value: power };
+    shader.uniforms.u_rainPulse = rainUniforms.u_rainPulse;
+    shader.uniforms.u_rainTime = rainUniforms.u_rainTime;
+    if (rim) {
+      shader.uniforms.u_rimColor = { value: rim.color };
+      shader.uniforms.u_rimStrength = { value: rim.strength };
+      shader.uniforms.u_rimPower = { value: rim.power };
+    }
 
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <common>',
       `#include <common>
-       uniform vec3 u_rimColor;
-       uniform float u_rimStrength;
-       uniform float u_rimPower;`
+       uniform float u_rainPulse;
+       uniform float u_rainTime;
+       ${rim ? 'uniform vec3 u_rimColor; uniform float u_rimStrength; uniform float u_rimPower;' : ''}
+       float otterHash12(vec2 p) {
+         vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+         p3 += dot(p3, p3.yzx + 33.33);
+         return fract((p3.x + p3.y) * p3.z);
+       }`
+    );
+
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <normal_fragment_maps>',
+      `#include <normal_fragment_maps>
+       vec3 otterUpView = normalize((viewMatrix * vec4(0.0, 1.0, 0.0, 0.0)).xyz);
+       float otterTop = clamp(dot(normal, otterUpView), 0.0, 1.0);
+       float otterRainPulse = clamp(u_rainPulse, 0.0, 1.0);
+       float otterRainMask = smoothstep(0.15, 0.9, otterTop) * otterRainPulse;
+       diffuseColor.rgb *= 1.0 - otterRainMask * 0.22;
+       roughnessFactor = mix(roughnessFactor, max(0.045, roughnessFactor * 0.35), otterRainMask);`
     );
 
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <opaque_fragment>',
-      `float _rim = pow(1.0 - saturate(dot(normalize(normal), normalize(vViewPosition))), u_rimPower);
-       outgoingLight += u_rimColor * (u_rimStrength * _rim);
+      `float otterSparkle = 0.0;
+       if (otterRainMask > 0.001) {
+         vec2 otterSparkleUv = gl_FragCoord.xy * 0.55 + vec2(u_rainTime * 37.0, u_rainTime * -29.0);
+         float otterSparkleNoise = otterHash12(otterSparkleUv);
+         float otterSparkleMask = smoothstep(0.986, 1.0, otterSparkleNoise);
+         otterSparkle = otterSparkleMask * otterRainMask;
+       }
+       outgoingLight += otterSparkle * vec3(0.7, 0.78, 0.88) * 0.35;
+       ${rim ? 'float _rim = pow(1.0 - saturate(dot(normalize(normal), normalize(vViewPosition))), u_rimPower);\n       outgoingLight += u_rimColor * (u_rimStrength * _rim);' : ''}
        #include <opaque_fragment>`
     );
   };
 
-  mat.customProgramCacheKey = () => `otter_fur_rim_${strength.toFixed(3)}_${power.toFixed(3)}`;
+  const rimKey = rim ? `rim_${rim.strength.toFixed(3)}_${rim.power.toFixed(3)}` : 'norim';
+  mat.customProgramCacheKey = () => `otter_fur_${rimKey}_rain_v1`;
+  mat.needsUpdate = true;
+  return rainUniforms;
 }

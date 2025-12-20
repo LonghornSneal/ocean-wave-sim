@@ -59,13 +59,13 @@ export const LOCATION_PRESETS: LocationPresetName[] = [
 export function qualityInfo(q: QualityMode): string {
   switch (q) {
     case 'Low':
-      return 'Fastest. Lower ocean mesh density, fewer particles/waves. Best for weak phones.';
+      return 'Fastest. Lower ocean mesh density, fewer particles/waves, simplified otter animation. Best for weak phones.';
     case 'Medium':
-      return 'Balanced. Decent mesh density + particles. Good default on most devices.';
+      return 'Balanced. Decent mesh density + particles, simplified otter animation. Good default on most devices.';
     case 'High':
-      return 'Prettier. Higher mesh density + more wave components + nicer sky updates.';
+      return 'Prettier. Higher mesh density + more wave components + nicer sky updates + full otter rig.';
     case 'Max':
-      return 'Max visuals. Highest mesh density, more particles, and experimental screen-space ray-traced reflections (heavy).';
+      return 'Max visuals. Highest mesh density, more particles, full otter rig, and experimental screen-space ray-traced reflections (heavy).';
     default:
       return '';
   }
@@ -157,6 +157,12 @@ export interface AppParams {
   exoticEncounters_pct: number;        // 0..100
   /** High mode only: extra geometry for a fur-like silhouette. */
   otterFurSilhouette: boolean;
+  /** Debug: show animation state and bone helpers. */
+  showAnimationState: boolean;
+  /** Debug: pause animation pose updates. */
+  freezePose: boolean;
+  /** Debug: overlay the meshes used for otter-water contact. */
+  showContactMeshes: boolean;
 
   // Camera
   /** Follow distance behind the otter (meters). */
@@ -276,6 +282,9 @@ export function defaultParams(): AppParams {
     otterosity_pct: 55,
     exoticEncounters_pct: 8,
     otterFurSilhouette: q === 'High' || q === 'Max',
+    showAnimationState: false,
+    freezePose: false,
+    showContactMeshes: false,
 
     // Default “cinematic” follow camera framing.
     cameraDistance_m: 9.0,
@@ -364,6 +373,9 @@ type PersistedParams = Pick<
   | 'otterosity_pct'
   | 'exoticEncounters_pct'
   | 'otterFurSilhouette'
+  | 'showAnimationState'
+  | 'freezePose'
+  | 'showContactMeshes'
   | 'cameraDistance_m'
   | 'cameraElevation_m'
   | 'clarity_pct'
@@ -471,6 +483,9 @@ export function applyPersistedParams(params: AppParams): void {
     params.exoticEncounters_pct = clamp(data.exoticEncounters_pct, 0, 100);
   }
   if (typeof data.otterFurSilhouette === 'boolean') params.otterFurSilhouette = data.otterFurSilhouette;
+  if (typeof data.showAnimationState === 'boolean') params.showAnimationState = data.showAnimationState;
+  if (typeof data.freezePose === 'boolean') params.freezePose = data.freezePose;
+  if (typeof data.showContactMeshes === 'boolean') params.showContactMeshes = data.showContactMeshes;
   if (typeof data.cameraDistance_m === 'number' && Number.isFinite(data.cameraDistance_m)) params.cameraDistance_m = clamp(data.cameraDistance_m, 9.0, 18.0);
   if (typeof data.cameraElevation_m === 'number' && Number.isFinite(data.cameraElevation_m)) params.cameraElevation_m = clamp(data.cameraElevation_m, 0.35, 3.0);
   if (typeof data.clarity_pct === 'number' && Number.isFinite(data.clarity_pct)) params.clarity_pct = clamp(data.clarity_pct, 0, 100);
@@ -585,6 +600,9 @@ export function savePersistedParams(params: AppParams): void {
     otterosity_pct: params.otterosity_pct,
     exoticEncounters_pct: params.exoticEncounters_pct,
     otterFurSilhouette: params.otterFurSilhouette,
+    showAnimationState: params.showAnimationState,
+    freezePose: params.freezePose,
+    showContactMeshes: params.showContactMeshes,
     cameraDistance_m: params.cameraDistance_m,
     cameraElevation_m: params.cameraElevation_m,
     clarity_pct: params.clarity_pct,
@@ -787,6 +805,10 @@ export function createGUI(params: AppParams, h: GUIHandlers): GUI {
   fOtter.add(params, 'otterosity_pct', 0, 100, 1).name('Otterosity').onChange(h.onAnyChange);
   fOtter.add(params, 'exoticEncounters_pct', 0, 100, 1).name('exotic encounters (%)').onChange(h.onAnyChange);
   fOtter.add(params, 'otterFurSilhouette').name('fur silhouette (Hi/Max)').onChange(h.onAnyChange);
+  const fOtterDebug = fOtter.addFolder('Debug');
+  const cShowAnim = fOtterDebug.add(params, 'showAnimationState').name('show animation state').onChange(h.onAnyChange);
+  const cFreezePose = fOtterDebug.add(params, 'freezePose').name('freeze pose').onChange(h.onAnyChange);
+  const cShowContacts = fOtterDebug.add(params, 'showContactMeshes').name('show contact meshes').onChange(h.onAnyChange);
 
   const fCam = gui.addFolder('Camera');
   const cCamDist = fCam.add(params, 'cameraDistance_m', 9.0, 18.0, 0.01).name('distance (m)').onChange(() => {
@@ -932,6 +954,9 @@ export function createGUI(params: AppParams, h: GUIHandlers): GUI {
   setTooltip(cCapSlope, 'Capillary amplitude falloff for shorter ripples. Range: 0.25-3 (safe 0.6-2).');
   setTooltip(cCapSpread, 'Capillary direction spread. 0=aligned, 1=broad. Range: 0-1 (safe <=0.4).');
   setTooltip(cCapCount, 'Capillary component count carved from total waves. Range: 0-16 (safe 4-10).');
+  setTooltip(cShowAnim, 'Show the otter animation state overlay + bone helpers.');
+  setTooltip(cFreezePose, 'Pause otter pose updates (debug).');
+  setTooltip(cShowContacts, 'Overlay meshes used for otter-water contact.');
 
   const fPerf = gui.addFolder('Performance Mode');
   const qCtrl = fPerf.add(params, 'quality', ['Low', 'Medium', 'High', 'Max']).name('mode');

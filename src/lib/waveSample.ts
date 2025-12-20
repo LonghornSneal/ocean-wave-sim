@@ -8,6 +8,7 @@ export interface WaveSample {
   normal: THREE.Vector3;
   disp: THREE.Vector3;
   slope: number;
+  orbitalVelY_mps: number;
 }
 
 export interface WaveSampleOptions {
@@ -44,7 +45,8 @@ export function sampleGerstner(
     height_m: 0,
     normal: new THREE.Vector3(),
     disp: new THREE.Vector3(),
-    slope: 0
+    slope: 0,
+    orbitalVelY_mps: 0
   },
   tmpT: THREE.Vector3 = new THREE.Vector3(),
   tmpB: THREE.Vector3 = new THREE.Vector3(),
@@ -55,6 +57,7 @@ export function sampleGerstner(
 ): WaveSample {
   const disp = out.disp;
   disp.set(0, 0, 0);
+  out.orbitalVelY_mps = 0;
 
   // Partial derivatives for normal reconstruction (matches shader)
   let dxdx = 0.0;
@@ -63,6 +66,7 @@ export function sampleGerstner(
   let dzdz = 0.0;
   let dydx = 0.0;
   let dydz = 0.0;
+  let velY = 0.0;
 
   const octaveCounts = scratch?.octaveCounts ?? new Map<number, number>();
   octaveCounts.clear();
@@ -115,6 +119,7 @@ export function sampleGerstner(
     disp.y += ASharp * s;
     disp.x += dirX * (Qeff * ASharp * c);
     disp.z += dirZ * (Qeff * ASharp * c);
+    velY += -ASharp * ww * c;
 
     const WAk = Qeff * ASharp * k;
 
@@ -156,6 +161,7 @@ export function sampleGerstner(
       disp.y += A * s;
       disp.x += dirX * (Q * A * c);
       disp.z += dirZ * (Q * A * c);
+      velY += -A * w * c;
 
       const WAk = Q * A * k;
 
@@ -177,6 +183,7 @@ export function sampleGerstner(
 
   out.slope = 1.0 - out.normal.y;
   out.height_m = height;
+  out.orbitalVelY_mps = velY;
 
   return out;
 }

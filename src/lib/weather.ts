@@ -60,6 +60,8 @@ export interface WeatherState {
   windSpeed_mps: number;
   windDirFrom_deg: number;
   gustiness: number; // 0..1
+  gustStrength01: number; // 0..1
+  gustFactor: number; // >= 1
 
   // Meta used by wave-growth model
   stormRadius_km: number;
@@ -412,6 +414,12 @@ export class WeatherSim {
     this.windDirFrom = lerpAngleDeg(this.windDirFrom, finalWindDir, kWind);
     this.gustiness = lerp(this.gustiness, gustTarget, kWind);
 
+    const gustFreq = lerp(0.06, 0.25, this.gustiness);
+    const gustNoise = fbm1(this.time_s * gustFreq + seed * 0.37, seed + 91.7, 3);
+    const gustPulse = smoothstep(0.6, 0.94, gustNoise);
+    const gustStrength01 = clamp(gustPulse * this.gustiness, 0, 1);
+    const gustFactor = 1 + gustStrength01 * 0.45;
+
     // Proxy for wind duration: how long has wind been steady?
     const dirDelta = Math.abs((((finalWindDir - this.windDirFrom) + 540) % 360) - 180);
     if (this.windSpeed > 1.5 && dirDelta < 25) {
@@ -476,6 +484,8 @@ export class WeatherSim {
       windSpeed_mps: this.windSpeed,
       windDirFrom_deg: clampAngleDeg(this.windDirFrom),
       gustiness: this.gustiness,
+      gustStrength01,
+      gustFactor,
       stormRadius_km: stormRadius,
       fetchUtilization: fetchUtil,
       stormAge_h,

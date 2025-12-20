@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import type { WaveComponent } from './spectrum';
 import type { RogueWaveState, SeismicPulseState } from './wavePhysics';
-import { clamp, lerp } from './math';
+import { clamp, lerp, smoothstep } from './math';
 import { sampleGerstner, type WaveSampleScratch } from './waveSample';
 
 export interface OtterWaterlineUpdate {
@@ -12,9 +12,11 @@ export interface OtterWaterlineUpdate {
   rogue?: RogueWaveState;
   pulse?: SeismicPulseState | null;
   cameraPos: THREE.Vector3;
+  cameraDistance_m: number;
   sunIntensity: number; // 0..1
   night: number; // 0..1
   underwater: boolean;
+  refresh?: boolean;
   contactMeshes: THREE.Mesh[];
   contactMeshesVersion: number;
 }
@@ -29,13 +31,27 @@ type MeshCache = {
 const WATERLINE_EPS = 1e-4;
 const WATERLINE_OFFSET_M = 0.015;
 const MAX_SKIP_MARGIN_M = 0.12;
+const WATERLINE_SURFACE_NEAR_M = 0.02;
+const WATERLINE_SURFACE_FAR_M = 0.18;
+const WATERLINE_MIN_HALF_WIDTH_M = 0.002;
+const WATERLINE_MAX_HALF_WIDTH_M = 0.01;
+const WATERLINE_MIN_ALPHA = 0.35;
+const WATERLINE_MAX_ALPHA = 1.0;
+const WATERLINE_CAM_BOOST_NEAR_M = 2.5;
+const WATERLINE_CAM_BOOST_FAR_M = 16.0;
+const WATERLINE_CAM_BOOST_MIN = 0.55;
+const WATERLINE_CAM_BOOST_MAX = 1.35;
+const WATERLINE_SEGMENT_VERTS = 6;
+const WATERLINE_SEGMENT_FLOATS = WATERLINE_SEGMENT_VERTS * 3;
 
 export class OtterWaterline {
-  public readonly mesh: THREE.LineSegments;
+  public readonly mesh: THREE.Mesh;
 
   private readonly geometry: THREE.BufferGeometry;
   private positionAttr: THREE.BufferAttribute;
+  private strengthAttr: THREE.BufferAttribute;
   private positions: Float32Array = new Float32Array(0);
+  private strengths: Float32Array = new Float32Array(0);
   private maxSegments = 0;
   private contactMeshes: THREE.Mesh[] = [];
   private meshVersion = -1;
@@ -43,7 +59,7 @@ export class OtterWaterline {
 
   private readonly meshCaches = new Map<string, MeshCache>();
 
-  private readonly tmpWaveSample = { height_m: 0, normal: new THREE.Vector3(), disp: new THREE.Vector3(), slope: 0 };
+  private readonly tmpWaveSample = { height_m: 0, normal: new THREE.Vector3(), disp: new THREE.Vector3(), slope: 0, orbitalVelY_mps: 0 };
   private readonly tmpWaveT = new THREE.Vector3();
   private readonly tmpWaveB = new THREE.Vector3();
   private readonly tmpV2 = new THREE.Vector2();
@@ -59,6 +75,9 @@ export class OtterWaterline {
     this.positionAttr = new THREE.BufferAttribute(this.positions, 3);
     this.positionAttr.setUsage(THREE.DynamicDrawUsage);
     this.geometry.setAttribute('position', this.positionAttr);
+    this.strengthAttr = new THREE.BufferAttribute(this.strengths, 1);
+    this.strengthAttr.setUsage(THREE.DynamicDrawUsage);
+    this.geometry.setAttribute('a_strength', this.strengthAttr);
     this.geometry.setDrawRange(0, 0);
 
     const mat = new THREE.ShaderMaterial({
@@ -66,6 +85,7 @@ export class OtterWaterline {
       depthWrite: false,
       depthTest: true,
       blending: THREE.NormalBlending,
+      side: THREE.DoubleSide,
       uniforms: {
         u_cameraPos: { value: new THREE.Vector3() },
         u_fadeNear: { value: 9.0 },
@@ -74,14 +94,17 @@ export class OtterWaterline {
         u_color: { value: new THREE.Color('#0c1216') }
       },
       vertexShader: /* glsl */ `
+        attribute float a_strength;
         uniform vec3 u_cameraPos;
         uniform float u_fadeNear;
         uniform float u_fadeFar;
         varying float v_fade;
+        varying float v_strength;
         void main() {
           vec4 worldPos = modelMatrix * vec4(position, 1.0);
           float dist = distance(worldPos.xyz, u_cameraPos);
           v_fade = 1.0 - smoothstep(u_fadeNear, u_fadeFar, dist);
+          v_strength = a_strength;
           gl_Position = projectionMatrix * viewMatrix * worldPos;
         }
       `,
@@ -89,8 +112,9 @@ export class OtterWaterline {
         uniform float u_strength;
         uniform vec3 u_color;
         varying float v_fade;
+        varying float v_strength;
         void main() {
-          float a = u_strength * v_fade;
+          float a = u_strength * v_fade * v_strength;
           gl_FragColor = vec4(u_color, a);
           #include <tonemapping_fragment>
           #include <colorspace_fragment>
@@ -98,7 +122,7 @@ export class OtterWaterline {
       `
     });
 
-    this.mesh = new THREE.LineSegments(this.geometry, mat);
+    this.mesh = new THREE.Mesh(this.geometry, mat);
     this.mesh.name = 'OtterWaterline';
     this.mesh.frustumCulled = false;
     this.mesh.renderOrder = 1;
@@ -106,9 +130,11 @@ export class OtterWaterline {
   }
 
   public update(u: OtterWaterlineUpdate): void {
+    let forceRefresh = false;
     if (u.contactMeshesVersion !== this.meshVersion) {
       this.meshVersion = u.contactMeshesVersion;
       this.setContactMeshes(u.contactMeshes);
+      forceRefresh = true;
     }
 
     const mat = this.mesh.material as THREE.ShaderMaterial;
@@ -116,7 +142,10 @@ export class OtterWaterline {
 
     const sunFactor = lerp(0.35, 1.0, clamp(u.sunIntensity, 0, 1));
     const nightFactor = lerp(0.35, 1.0, clamp(1 - u.night, 0, 1));
-    mat.uniforms.u_strength.value = 0.22 * sunFactor * nightFactor;
+    const cameraDistance_m = Math.max(0, u.cameraDistance_m);
+    const camBoostT = smoothstep(WATERLINE_CAM_BOOST_NEAR_M, WATERLINE_CAM_BOOST_FAR_M, cameraDistance_m);
+    const camBoost = lerp(WATERLINE_CAM_BOOST_MAX, WATERLINE_CAM_BOOST_MIN, camBoostT);
+    mat.uniforms.u_strength.value = 0.22 * sunFactor * nightFactor * camBoost;
 
     if (u.underwater || this.contactMeshes.length === 0 || this.maxSegments === 0 || mat.uniforms.u_strength.value < 1e-4) {
       this.geometry.setDrawRange(0, 0);
@@ -124,8 +153,16 @@ export class OtterWaterline {
       return;
     }
 
+    const hasSegments = this.geometry.drawRange.count > 0;
+    const refresh = forceRefresh || u.refresh !== false || !hasSegments;
+    if (!refresh) {
+      this.mesh.visible = hasSegments;
+      return;
+    }
+
     let segCount = 0;
     const positions = this.positions;
+    const strengths = this.strengths;
     let exhausted = false;
 
     for (const mesh of this.contactMeshes) {
@@ -232,6 +269,8 @@ export class OtterWaterline {
         let hitCount = 0;
         let ax = 0; let ay = 0; let az = 0;
         let bx = 0; let by = 0; let bz = 0;
+        let aStrength = 0;
+        let bStrength = 0;
 
         if (d0 * d1 < 0) {
           const tEdge = clamp(d0 / (d0 - d1), 0, 1);
@@ -248,8 +287,11 @@ export class OtterWaterline {
           const z = z0 + (z1 - z0) * tEdge;
           const h = h0 + (h1 - h0) * tEdge;
           const y = h + WATERLINE_OFFSET_M;
+          const edgeAbs = (Math.abs(d0) + Math.abs(d1)) * 0.5;
+          const edgeStrength = 1.0 - smoothstep(WATERLINE_SURFACE_NEAR_M, WATERLINE_SURFACE_FAR_M, edgeAbs);
 
           ax = x; ay = y; az = z;
+          aStrength = edgeStrength;
           hitCount = 1;
         }
 
@@ -268,12 +310,16 @@ export class OtterWaterline {
           const z = z0 + (z1 - z0) * tEdge;
           const h = h0 + (h1 - h0) * tEdge;
           const y = h + WATERLINE_OFFSET_M;
+          const edgeAbs = (Math.abs(d1) + Math.abs(d2)) * 0.5;
+          const edgeStrength = 1.0 - smoothstep(WATERLINE_SURFACE_NEAR_M, WATERLINE_SURFACE_FAR_M, edgeAbs);
 
           if (hitCount === 0) {
             ax = x; ay = y; az = z;
+            aStrength = edgeStrength;
             hitCount = 1;
           } else {
             bx = x; by = y; bz = z;
+            bStrength = edgeStrength;
             hitCount = 2;
           }
         }
@@ -293,12 +339,16 @@ export class OtterWaterline {
           const z = z0 + (z1 - z0) * tEdge;
           const h = h0 + (h1 - h0) * tEdge;
           const y = h + WATERLINE_OFFSET_M;
+          const edgeAbs = (Math.abs(d2) + Math.abs(d0)) * 0.5;
+          const edgeStrength = 1.0 - smoothstep(WATERLINE_SURFACE_NEAR_M, WATERLINE_SURFACE_FAR_M, edgeAbs);
 
           if (hitCount === 0) {
             ax = x; ay = y; az = z;
+            aStrength = edgeStrength;
             hitCount = 1;
           } else {
             bx = x; by = y; bz = z;
+            bStrength = edgeStrength;
             hitCount = 2;
           }
         }
@@ -313,20 +363,58 @@ export class OtterWaterline {
             break;
           }
 
-          const idx = segCount * 6;
-          positions[idx] = ax;
-          positions[idx + 1] = ay;
-          positions[idx + 2] = az;
-          positions[idx + 3] = bx;
-          positions[idx + 4] = by;
-          positions[idx + 5] = bz;
+          const segStrength = clamp((aStrength + bStrength) * 0.5, 0, 1);
+          const segAlpha = lerp(WATERLINE_MIN_ALPHA, WATERLINE_MAX_ALPHA, segStrength);
+          const halfWidth = lerp(WATERLINE_MIN_HALF_WIDTH_M, WATERLINE_MAX_HALF_WIDTH_M, segStrength);
+
+          const dx = bx - ax;
+          const dz = bz - az;
+          const lenXZ = Math.sqrt(dx * dx + dz * dz);
+          let sideX = 1;
+          let sideZ = 0;
+          if (lenXZ > 1e-6) {
+            const invLen = 1 / lenXZ;
+            sideX = -dz * invLen;
+            sideZ = dx * invLen;
+          }
+          const ox = sideX * halfWidth;
+          const oz = sideZ * halfWidth;
+
+          const posIdx = segCount * WATERLINE_SEGMENT_FLOATS;
+          positions[posIdx] = ax + ox;
+          positions[posIdx + 1] = ay;
+          positions[posIdx + 2] = az + oz;
+          positions[posIdx + 3] = ax - ox;
+          positions[posIdx + 4] = ay;
+          positions[posIdx + 5] = az - oz;
+          positions[posIdx + 6] = bx + ox;
+          positions[posIdx + 7] = by;
+          positions[posIdx + 8] = bz + oz;
+          positions[posIdx + 9] = bx + ox;
+          positions[posIdx + 10] = by;
+          positions[posIdx + 11] = bz + oz;
+          positions[posIdx + 12] = ax - ox;
+          positions[posIdx + 13] = ay;
+          positions[posIdx + 14] = az - oz;
+          positions[posIdx + 15] = bx - ox;
+          positions[posIdx + 16] = by;
+          positions[posIdx + 17] = bz - oz;
+
+          const strengthIdx = segCount * WATERLINE_SEGMENT_VERTS;
+          strengths[strengthIdx] = segAlpha;
+          strengths[strengthIdx + 1] = segAlpha;
+          strengths[strengthIdx + 2] = segAlpha;
+          strengths[strengthIdx + 3] = segAlpha;
+          strengths[strengthIdx + 4] = segAlpha;
+          strengths[strengthIdx + 5] = segAlpha;
           segCount += 1;
         }
       }
     }
 
     this.positionAttr.needsUpdate = true;
-    this.geometry.setDrawRange(0, segCount * 2);
+    this.strengthAttr.needsUpdate = true;
+    this.geometry.setDrawRange(0, segCount * WATERLINE_SEGMENT_VERTS);
     this.mesh.visible = segCount > 0;
   }
 
@@ -345,12 +433,17 @@ export class OtterWaterline {
     }
 
     this.maxSegments = Math.max(0, Math.floor(totalTris));
-    const nextSize = this.maxSegments * 2 * 3;
+    const nextVerts = this.maxSegments * WATERLINE_SEGMENT_VERTS;
+    const nextSize = nextVerts * 3;
 
     this.positions = nextSize > 0 ? new Float32Array(nextSize) : new Float32Array(0);
     this.positionAttr = new THREE.BufferAttribute(this.positions, 3);
     this.positionAttr.setUsage(THREE.DynamicDrawUsage);
     this.geometry.setAttribute('position', this.positionAttr);
+    this.strengths = nextVerts > 0 ? new Float32Array(nextVerts) : new Float32Array(0);
+    this.strengthAttr = new THREE.BufferAttribute(this.strengths, 1);
+    this.strengthAttr.setUsage(THREE.DynamicDrawUsage);
+    this.geometry.setAttribute('a_strength', this.strengthAttr);
     this.geometry.setDrawRange(0, 0);
   }
 }

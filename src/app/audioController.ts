@@ -34,7 +34,7 @@ export class AudioController {
     void this.audio.resume();
   }
 
-  updateFrame(dt: number, metrics: { U10: number; Hs: number; rain: number }): void {
+  updateFrame(dt: number, metrics: { U10: number; Hs: number; rain: number; rainImpact?: number; splashImpact?: number }): void {
     const audioActive = this.params.audioEnabled && this.audioArmed && !document.hidden;
     if (audioActive) {
       this.audio.setMasterVolume(this.params.masterVolume);

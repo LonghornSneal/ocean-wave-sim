@@ -2,6 +2,24 @@ import * as THREE from 'three';
 import { clamp, lerp } from '../math';
 import type { OtterLookMode } from '../otter';
 
+const TAU = Math.PI * 2;
+const NECK_SHARE = 0.35;
+const NECK_YAW_MAX = 0.22;
+const HEAD_YAW_MAX = 0.46;
+const NECK_PITCH_UP_MAX = 0.18;
+const NECK_PITCH_DOWN_MAX = 0.16;
+const HEAD_PITCH_UP_MAX = 0.38;
+const HEAD_PITCH_DOWN_MAX = 0.34;
+const TOTAL_YAW_MAX = HEAD_YAW_MAX + NECK_YAW_MAX;
+const TOTAL_PITCH_UP_MAX = HEAD_PITCH_UP_MAX + NECK_PITCH_UP_MAX;
+const TOTAL_PITCH_DOWN_MAX = HEAD_PITCH_DOWN_MAX + NECK_PITCH_DOWN_MAX;
+
+function wrapAngle(rad: number): number {
+  let r = (rad + Math.PI) % TAU;
+  if (r < 0) r += TAU;
+  return r - Math.PI;
+}
+
 export function updateOtterGaze(opts: {
   dt: number;
   storm: number;
@@ -22,6 +40,10 @@ export function updateOtterGaze(opts: {
   lookTimer_s: number;
   gazeYawOffset: number;
   gazeYawOffsetTarget: number;
+  headYawTarget: number;
+  headPitchTarget: number;
+  neckYawTarget: number;
+  neckPitchTarget: number;
 } {
   const {
     dt,
@@ -96,5 +118,42 @@ export function updateOtterGaze(opts: {
   }
   gazeDir.lerp(gazeTarget, clamp(dt * 2.0, 0, 1)).normalize();
 
-  return { lookMode, lookTimer_s, gazeYawOffset, gazeYawOffsetTarget };
+  // Head/neck targets bias toward the camera gaze while clamping to natural ranges.
+  const aimDir = tmpGazeTarget.copy(gazeDir);
+  const horizLenSq = aimDir.x * aimDir.x + aimDir.z * aimDir.z;
+  let yawRel = 0;
+  if (horizLenSq > 1e-6) {
+    const aimYaw = Math.atan2(aimDir.z, aimDir.x);
+    yawRel = wrapAngle(aimYaw - yaw);
+  }
+  const pitchRel = Math.asin(clamp(aimDir.y, -1, 1));
+
+  const pitchUpScale = lookMode === 'Sky' ? 1.1 : 1.0;
+  const pitchDownScale = lookMode === 'Underwater' ? 1.1 : 1.0;
+  const yawClamped = clamp(yawRel, -TOTAL_YAW_MAX, TOTAL_YAW_MAX);
+  const pitchClamped = clamp(
+    pitchRel,
+    -TOTAL_PITCH_DOWN_MAX * pitchDownScale,
+    TOTAL_PITCH_UP_MAX * pitchUpScale
+  );
+
+  const gazeBias = clamp(0.6 + 0.3 * otterosity, 0.6, 0.9);
+  const yawBiased = yawClamped * gazeBias;
+  const pitchBiased = pitchClamped * gazeBias;
+
+  const neckYawTarget = clamp(yawBiased * NECK_SHARE, -NECK_YAW_MAX, NECK_YAW_MAX);
+  const headYawTarget = clamp(yawBiased - neckYawTarget, -HEAD_YAW_MAX, HEAD_YAW_MAX);
+  const neckPitchTarget = clamp(pitchBiased * NECK_SHARE, -NECK_PITCH_DOWN_MAX, NECK_PITCH_UP_MAX);
+  const headPitchTarget = clamp(pitchBiased - neckPitchTarget, -HEAD_PITCH_DOWN_MAX, HEAD_PITCH_UP_MAX);
+
+  return {
+    lookMode,
+    lookTimer_s,
+    gazeYawOffset,
+    gazeYawOffsetTarget,
+    headYawTarget,
+    headPitchTarget,
+    neckYawTarget,
+    neckPitchTarget
+  };
 }

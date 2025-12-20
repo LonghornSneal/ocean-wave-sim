@@ -14,6 +14,7 @@ import type { SeaOtter } from '../lib/otter';
 import type { OtterCameraRig } from '../lib/otterCamera';
 import type { OceanLife } from '../lib/life';
 import type { PrecipitationSystem } from '../lib/precip';
+import type { RainMist } from '../lib/rainMist';
 import type { CloudDeck } from '../lib/clouds';
 import type { LightningBolts } from '../lib/lightningBolts';
 import type { HorizonIslands } from '../lib/islands';
@@ -46,6 +47,7 @@ import { sampleGerstner } from '../lib/waveSample';
 import { moonPhaseFraction } from '../lib/ui';
 import type { PlanarReflectionController } from './planarReflection';
 import type { AudioController } from './audioController';
+import type { OtterDebugTools } from './otterDebug';
 import { updateMoonPhase } from './skyHelpers';
 import { IS_MOBILE_LIKE } from './quality';
 import { oceanLodForQuality } from './oceanSetup';
@@ -56,9 +58,11 @@ type PostFXState = {
   heightFogPass: ShaderPass | null;
   underwaterPass: ShaderPass | null;
   bloomPass: UnrealBloomPass | null;
+  dropletPass: ShaderPass | null;
   grainPass: ShaderPass | null;
   gradePass: ShaderPass | null;
   outputPass: OutputPass | null;
+  composerDepthTex: THREE.DepthTexture | null;
 };
 
 export type LoopState = {
@@ -91,6 +95,7 @@ export type LoopState = {
   otterOrbMesh: THREE.Mesh;
   life: OceanLife;
   precip: PrecipitationSystem;
+  rainMist: RainMist;
   cloudLayers: Array<{ deck: CloudDeck; minQuality: AppParams['quality'] }>;
   qualityRank: Record<AppParams['quality'], number>;
   lightningBolts: LightningBolts;
@@ -103,6 +108,7 @@ export type LoopState = {
   wakeRibbon: WakeRibbon;
   waterline: OtterWaterline;
   perfOverlay: PerfOverlay;
+  otterDebug: OtterDebugTools;
   pmrem: THREE.PMREMGenerator;
   get envRT(): THREE.WebGLRenderTarget | null;
   set envRT(v: THREE.WebGLRenderTarget | null);
@@ -151,17 +157,26 @@ const tmpV3b = new THREE.Vector3();
 const tmpV3c = new THREE.Vector3();
 const tmpV3d = new THREE.Vector3();
 const tmpV3e = new THREE.Vector3();
+const tmpV3f = new THREE.Vector3();
 const tmpV2a = new THREE.Vector2();
 const tmpV2b = new THREE.Vector2();
+const tmpRenderSize = new THREE.Vector2();
 const tmpWindXZ = new THREE.Vector2();
 const tmpOtterXZ = new THREE.Vector2();
 const tmpRogueXZ = new THREE.Vector2();
 const tmpOtterDirXZ = new THREE.Vector2();
+const tmpPaddleDirXZ = new THREE.Vector2();
 const tmpSunWorldPos = new THREE.Vector3();
 const tmpSunNDC = new THREE.Vector3();
+const tmpRainCenter = new THREE.Vector3();
+const tmpRainHit = new THREE.Vector3();
 
-const tmpSurfSample = { height_m: 0, normal: new THREE.Vector3(), disp: new THREE.Vector3(), slope: 0 };
-const tmpSurfSampleEvent = { height_m: 0, normal: new THREE.Vector3(), disp: new THREE.Vector3(), slope: 0 };
+const RAIN_HIT_BOX = new THREE.Vector3(0.85, 0.75, 0.85);
+const RAIN_HIT_RADIUS = 0.65;
+const RAIN_HIT_Y_OFFSET = 0.2;
+
+const tmpSurfSample = { height_m: 0, normal: new THREE.Vector3(), disp: new THREE.Vector3(), slope: 0, orbitalVelY_mps: 0 };
+const tmpSurfSampleEvent = { height_m: 0, normal: new THREE.Vector3(), disp: new THREE.Vector3(), slope: 0, orbitalVelY_mps: 0 };
 const tmpSurfT = new THREE.Vector3();
 const tmpSurfB = new THREE.Vector3();
 
@@ -208,8 +223,12 @@ export function startAnimationLoop(state: LoopState): LoopControls {
   let lastEnvSunset = -1;
   let lastEnvNight = -1;
   const lastEnvSunDir = new THREE.Vector3(0, 1, 0);
+  const cameraPrevPos = new THREE.Vector3();
+  const cameraVel = new THREE.Vector3();
+  let cameraVelReady = false;
 
   let underwaterBlend = 0;
+  let waterlineRefreshTimer_s = 0;
   let lightningFlash01 = 0;
   let lightningFlashFx = 0;
   let lightningBurstPulses = 0;
@@ -222,6 +241,16 @@ export function startAnimationLoop(state: LoopState): LoopControls {
   let lightningSkyGlow = 0;
   let currentBiome = biomeFor(state.params.latitude_deg, 12);
   const rogueWaves: WaveComponent[] = [];
+  let camSpeedEma = 0;
+  let dropletStrength = 0;
+  let dropletStreak = 0;
+  let rainHitCarry = 0;
+  let splashImpactPrev = 0;
+  let splashKick01 = 0;
+  let splashVibeCooldown_s = 0;
+  let idleHeadingWander_rad = 0;
+  let idleHeadingWanderVel = 0;
+  const WATERLINE_REFRESH_INTERVAL_S = 0.06;
 
   function handleVisibilityChange(): void {
     simPaused = document.hidden;
@@ -331,6 +360,8 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       state.params.windSpeedBeaufort = Math.round(bft * 10) / 10;
     }
     const swellFromWind = swellStateFromWindSpeed(wx.windSpeed_mps);
+    const gustStrength01 = clamp(wx.gustStrength01, 0, 1);
+    const gustFactor = Math.max(1.0, wx.gustFactor);
 
     const phaseFrac = moonPhaseFraction(state.params.moonPhaseName);
     const cel = computeCelestials({
@@ -756,6 +787,28 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       lightningIntensity: lightningFlashFx
     });
 
+    if (wx.precipType === 'Rain' && wx.precipIntensity > 0.02) {
+      const hitRate = lerp(1.0, 16.0, wx.precipIntensity);
+      rainHitCarry += hitRate * dt;
+      const hits = Math.floor(rainHitCarry);
+      rainHitCarry -= hits;
+
+      tmpRainCenter.copy(state.otter.position).lerp(state.camera.position, 0.35);
+      for (let i = 0; i < hits; i++) {
+        tmpRainHit.set(
+          tmpRainCenter.x + (Math.random() * 2 - 1) * RAIN_HIT_BOX.x,
+          tmpRainCenter.y + (Math.random() * 2 - 1) * RAIN_HIT_BOX.y + RAIN_HIT_Y_OFFSET,
+          tmpRainCenter.z + (Math.random() * 2 - 1) * RAIN_HIT_BOX.z
+        );
+        if (tmpRainHit.distanceToSquared(state.otter.position) <= RAIN_HIT_RADIUS * RAIN_HIT_RADIUS) {
+          const impulse = lerp(0.12, 0.35, Math.random()) * wx.precipIntensity;
+          state.otter.receiveRainHit(impulse);
+        }
+      }
+    } else {
+      rainHitCarry = 0;
+    }
+
     const otterosity = clamp(state.params.otterosity_pct / 100, 0, 1);
     const interestDir = sunVis > 0.15 ? sunDir : (cel.moonIntensity > 0.18 ? moonDir : undefined);
     state.otter.update(
@@ -764,7 +817,8 @@ export function startAnimationLoop(state: LoopState): LoopControls {
         storminess: clamp(wx.precipIntensity + wx.storminess * 0.7 + wx.hurricaneIntensity, 0, 1),
         waveChaos,
         windDirTo_rad: state.windDirTo_rad,
-        interestDir
+        interestDir,
+        freezePose: state.params.freezePose
       },
       {
         dt_s: dt,
@@ -790,18 +844,39 @@ export function startAnimationLoop(state: LoopState): LoopControls {
     }
     state.otterPrevXZ.copy(tmpOtterXZ);
 
-    const useVelDir = state.otterSpeed_mps > 0.02 && (dx * dx + dz * dz) > 1e-8;
-    if (useVelDir) {
-      tmpV2b.set(dx, dz);
-    } else {
-      tmpV2b.set(state.otter.bodyForward.x, state.otter.bodyForward.z);
+    const velLenSq = dx * dx + dz * dz;
+    const useVelDir = state.otterSpeed_mps > 0.01 && velLenSq > 1e-8;
+    tmpV2b.set(state.otter.bodyForward.x, state.otter.bodyForward.z);
+    if (velLenSq > 1e-8) {
+      tmpV2a.set(dx, dz).multiplyScalar(1 / Math.sqrt(velLenSq));
+      const velBlend = useVelDir ? lerp(0.35, 0.9, smoothstep(0.01, 0.08, state.otterSpeed_mps)) : 0.0;
+      tmpV2b.lerp(tmpV2a, velBlend);
     }
     if (tmpV2b.lengthSq() > 1e-8) tmpV2b.normalize();
     else tmpV2b.set(0, 1);
+    const idleWander01 = 1.0 - smoothstep(0.0, 0.01, state.otterSpeed_mps);
+    if (idleWander01 > 1e-4) {
+      const wanderAccel = 0.25 * idleWander01;
+      idleHeadingWanderVel += (Math.random() * 2 - 1) * wanderAccel * dt;
+      idleHeadingWanderVel = clamp(idleHeadingWanderVel, -0.12, 0.12);
+      idleHeadingWander_rad = clamp(idleHeadingWander_rad + idleHeadingWanderVel * dt, -0.045, 0.045);
+    } else {
+      idleHeadingWanderVel = lerp(idleHeadingWanderVel, 0, clamp(dt * 1.8, 0, 1));
+      idleHeadingWander_rad = lerp(idleHeadingWander_rad, 0, clamp(dt * 1.2, 0, 1));
+    }
+    const idleWanderAngle = idleHeadingWander_rad * idleWander01;
+    if (Math.abs(idleWanderAngle) > 1e-5) {
+      const sinA = Math.sin(idleWanderAngle);
+      const cosA = Math.cos(idleWanderAngle);
+      const x = tmpV2b.x;
+      const y = tmpV2b.y;
+      tmpV2b.set(x * cosA - y * sinA, x * sinA + y * cosA);
+    }
     const dirSmooth = clamp(dt * (useVelDir ? 7.0 : 2.0), 0, 1);
     tmpOtterDirXZ.lerp(tmpV2b, dirSmooth);
     if (tmpOtterDirXZ.lengthSq() > 1e-8) tmpOtterDirXZ.normalize();
     else tmpOtterDirXZ.copy(tmpV2b);
+    tmpPaddleDirXZ.copy(tmpOtterDirXZ).multiplyScalar(-1);
 
     const surf = sampleGerstner(
       state.wavesCurrent,
@@ -828,12 +903,22 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       state.seismicPulse,
       { includeTags: ['event'], applyCrestSharpness: true }
     );
-    const paddleImpulse01 = (state.otter as any).paddleImpulse01 ?? 0;
+    const amplifiedImpulse01 = (state.otter as any).paddleImpulse01 ?? 0;
+    const strokeImpact01 = (state.otter as any).strokeImpact01 ?? 0;
+    const paddleBurst01 = (state.otter as any).paddleSplashBurst01 ?? 0;
     const bodyWaterlineOffset_m = 0.12;
     const depth_m = surf.height_m - (state.otter.position.y - bodyWaterlineOffset_m);
     const surfaceGate = smoothstep(0.0, 0.20, depth_m);
     const deepGate = 1.0 - smoothstep(0.28, 0.70, depth_m);
     const contact01 = clamp(surfaceGate * deepGate, 0, 1);
+    const paddleSplashBurst01 = clamp(paddleBurst01 * contact01, 0, 1);
+    const speed01 = clamp(state.otterSpeed_mps / 0.35, 0, 1);
+    const strokeBoost01 = clamp(strokeImpact01 * lerp(0.25, 0.9, speed01), 0, 1) * contact01;
+    const rippleImpulse01 = clamp(amplifiedImpulse01 * 0.45 + strokeBoost01, 0, 1);
+    const wakeImpulse01 = clamp(amplifiedImpulse01 * 0.35 + strokeBoost01, 0, 1);
+    waterlineRefreshTimer_s = Math.max(0, waterlineRefreshTimer_s - dt);
+    const waterlineRefresh = strokeImpact01 > 0.001 || waterlineRefreshTimer_s <= 0;
+    if (waterlineRefresh) waterlineRefreshTimer_s = WATERLINE_REFRESH_INTERVAL_S;
     const headPos = state.otter.getHeadWorldPosition(tmpV3c);
     const eyePos = state.otter.getEyeWorldPosition(tmpV3d);
 
@@ -841,6 +926,27 @@ export function startAnimationLoop(state: LoopState): LoopControls {
     state.otterOrbMesh.position.y += 0.32;
     const orbMood = clamp(0.35 + 0.65 * night + 0.45 * clamp(wx.storminess + wx.hurricaneIntensity, 0, 1), 0, 1);
     (state.otterOrbMesh.material as THREE.MeshStandardMaterial).emissiveIntensity = lerp(2.5, 4.2, orbMood);
+
+    const allowSplashKick = !state.params.reduceFlashes && state.params.quality !== 'Low';
+    const allowCameraKick = allowSplashKick && !IS_MOBILE_LIKE;
+    const allowVibe = allowSplashKick && IS_MOBILE_LIKE
+      && typeof navigator !== 'undefined'
+      && typeof navigator.vibrate === 'function';
+    const splashBurst01 = allowSplashKick ? smoothstep(10, 20, splashImpactPrev) : 0;
+    if (allowCameraKick) {
+      splashKick01 = Math.max(splashKick01 - dt * 3.5, splashBurst01);
+    } else {
+      splashKick01 = 0;
+    }
+    if (allowVibe) {
+      splashVibeCooldown_s = Math.max(0, splashVibeCooldown_s - dt);
+      if (splashBurst01 > 0.85 && splashVibeCooldown_s <= 0) {
+        navigator.vibrate(10);
+        splashVibeCooldown_s = 0.25;
+      }
+    } else {
+      splashVibeCooldown_s = 0;
+    }
 
     state.camRig.update(state.camera, {
       dt_s: dt,
@@ -856,7 +962,25 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       followElevation_m: state.params.cameraElevation_m
     });
 
+    if (allowCameraKick && splashKick01 > 0.001) {
+      tmpV3f.set(0, 0, -1).applyQuaternion(state.camera.quaternion);
+      state.camera.position.addScaledVector(tmpV3f, -0.05 * splashKick01);
+      state.camera.position.y += 0.03 * splashKick01;
+    }
+
     state.camera.updateMatrixWorld();
+    if (!cameraVelReady) {
+      cameraPrevPos.copy(state.camera.position);
+      cameraVel.set(0, 0, 0);
+      cameraVelReady = true;
+    } else if (dt > 1e-6) {
+      cameraVel.copy(state.camera.position).sub(cameraPrevPos).divideScalar(dt);
+      cameraPrevPos.copy(state.camera.position);
+    } else {
+      cameraVel.set(0, 0, 0);
+      cameraPrevPos.copy(state.camera.position);
+    }
+    camSpeedEma = lerp(camSpeedEma, cameraVel.length(), clamp(dt * 2.5, 0, 1));
 
     state.sky.position.copy(state.camera.position);
 
@@ -878,7 +1002,7 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       sunIntensity: sunVis,
       sunset: sunsetNow,
       speed_mps: state.otterSpeed_mps,
-      paddleImpulse01,
+      paddleImpulse01: rippleImpulse01,
       motionDirXZ: tmpOtterDirXZ,
       contact01
     });
@@ -890,13 +1014,14 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       forwardXZ: tmpOtterDirXZ,
       surfaceY_m: surf.height_m,
       speed_mps: state.otterSpeed_mps,
-      paddleImpulse01,
+      paddleImpulse01: wakeImpulse01,
       calm01: calmness,
       pulseFoamDamp,
       contact01
     });
 
     const underwater = state.camera.position.y < (surf.height_m - 0.08);
+    const cameraDistToOtter_m = state.camera.position.distanceTo(state.otter.position);
 
     state.otter.group.updateMatrixWorld(true);
     state.waterline.update({
@@ -907,9 +1032,11 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       rogue: rogueState,
       pulse: state.seismicPulse,
       cameraPos: state.camera.position,
+      cameraDistance_m: cameraDistToOtter_m,
       sunIntensity: sunVis,
       night,
       underwater,
+      refresh: waterlineRefresh,
       contactMeshes: state.otter.getContactMeshes(),
       contactMeshesVersion: state.otter.getContactMeshesVersion()
     });
@@ -971,13 +1098,12 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       heightFogPass.uniforms.u_strength.value = clamp(1.0 - underwaterBlend, 0, 1);
     }
 
-    const speed01 = clamp(state.otterSpeed_mps / 0.35, 0, 1);
-    const contactFoam = contact01 * (0.10 + 0.20 * paddleImpulse01);
+    const contactFoam = contact01 * (0.10 + 0.20 * wakeImpulse01);
     const motionFoam =
-      (speed01 * (0.15 + 0.35 * calmness) + paddleImpulse01 * (0.18 + 0.22 * calmness)) * contact01;
+      (speed01 * (0.15 + 0.35 * calmness) + wakeImpulse01 * (0.18 + 0.22 * calmness)) * contact01;
     const wakeStrength = clamp(contactFoam + motionFoam, 0, 1);
     const wakeRadius = lerp(0.85, 1.95, speed01) * lerp(0.85, 1.1, contact01);
-    const wakeLength = (lerp(1.4, 6.4, speed01) + paddleImpulse01 * 1.6) * lerp(0.6, 1.0, contact01);
+    const wakeLength = (lerp(1.4, 6.4, speed01) + wakeImpulse01 * 1.6) * lerp(0.6, 1.0, contact01);
     state.foamField.update(state.renderer, {
       dt_s: dt,
       time_s: state.simTime_s,
@@ -1016,6 +1142,7 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       state.rainbow.mesh.visible = false;
       state.splashes.points.visible = false;
       state.lightningBolts.group.visible = false;
+      state.rainMist.points.visible = false;
       state.windSpray.points.visible = false;
     } else {
       const hazeStorm = clamp(wx.cloudCover * 0.55 + wx.precipIntensity * 0.85 + wx.storminess * 0.90 + wx.hurricaneIntensity * 1.0, 0, 1);
@@ -1059,6 +1186,7 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       state.rainbow.mesh.visible = true;
       state.splashes.points.visible = true;
       state.lightningBolts.group.visible = true;
+      state.rainMist.points.visible = true;
       state.windSpray.points.visible = true;
     }
 
@@ -1085,6 +1213,7 @@ export function startAnimationLoop(state: LoopState): LoopControls {
         cloudCover: wx.cloudCover,
         windDirFrom_deg: wx.windDirFrom_deg,
         windSpeed_mps: wx.windSpeed_mps,
+        gustiness: wx.gustiness,
         sunDir,
         sunColor: state.sunLight.color,
         sunIntensity: sunVis,
@@ -1098,16 +1227,40 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       });
     }
 
+    const rainIntensity = wx.precipType === 'Rain' ? wx.precipIntensity : 0;
+    const depthTexture = state.postFX.composerDepthTex ?? null;
     state.precip.update({
       dt_s: dt,
       time_s: state.simTime_s,
       cameraPos: state.camera.position,
       cameraQuat: state.camera.quaternion,
+      cameraVel,
+      sunDir,
+      sunIntensity: sunVis,
+      sunset,
+      otterPos: state.otter.position,
+      otterForward: state.otter.bodyForward,
       windDirFrom_deg: wx.windDirFrom_deg,
+      gustStrength01,
+      gustFactor,
       intensity: wx.precipIntensity,
       mode: wx.precipType === 'Snow' ? 'Snow' : (wx.precipType === 'Rain' ? 'Rain' : 'None'),
       visible: !underwater,
-      surfaceY: surf.height_m
+      surfaceY: surf.height_m,
+      depthTexture,
+      depthCamera: state.camera
+    });
+    state.rainMist.update({
+      dt_s: dt,
+      center: state.camera.position,
+      otterPos: state.otter.position,
+      surfaceY: surf.height_m,
+      windDirTo_rad: state.windDirTo_rad,
+      windSpeed_mps: wx.windSpeed_mps,
+      rainIntensity,
+      storminess,
+      waterTemp_C: wx.waterTemp_C,
+      visible: !underwater
     });
 
     state.rainbow.update({
@@ -1119,23 +1272,63 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       cloudCover: wx.cloudCover
     });
 
+    const sprayIntensity = clamp(
+      (
+        clamp(wx.windSpeed_mps / 20, 0, 1) * (0.25 + 0.75 * clamp(wx.storminess + wx.hurricaneIntensity, 0, 1)) * (1.0 + 0.90 * crossSea01)
+        + paddleImpulse01 * (0.20 + 0.25 * calmness)
+        + state.otter.wetness01 * 0.25
+      ),
+      0,
+      1
+    );
+    const sprayBias01 = clamp(state.otter.wetness01 * 0.7 + storminess * 0.25 + clamp(wx.windSpeed_mps / 30, 0, 1) * 0.2, 0, 1);
+    const twilight = sunset * (1 - night * 0.55);
+    const renderSize = state.renderer.getSize(tmpRenderSize);
+
     state.splashes.update({
       dt_s: dt,
       origin: state.otter.position,
       surfaceY: surf.height_m,
       slope: surfEvent.slope,
-      intensity: clamp(
-        (
-          clamp(wx.windSpeed_mps / 20, 0, 1) * (0.25 + 0.75 * clamp(wx.storminess + wx.hurricaneIntensity, 0, 1)) * (1.0 + 0.90 * crossSea01)
-          + paddleImpulse01 * (0.20 + 0.25 * calmness)
-          + state.otter.wetness01 * 0.25
-        ),
-        0,
-        1
-      ),
+      visible: !underwater,
+      intensity: sprayIntensity,
+      gustStrength01,
+      gustFactor,
       windDirTo_rad: derived.windDirTo_rad,
-      sprayBias01: clamp(state.otter.wetness01 * 0.7 + storminess * 0.25 + clamp(wx.windSpeed_mps / 30, 0, 1) * 0.2, 0, 1)
+      sunDir,
+      sunIntensity: sunVis,
+      sunset: twilight,
+      night,
+      storminess,
+      cloudCover: cc,
+      pixelRatio: state.renderer.getPixelRatio(),
+      viewHeight_px: renderSize.y,
+      sprayBias01,
+      paddleBurst01: paddleSplashBurst01,
+      paddleDirXZ: tmpPaddleDirXZ,
+      depthTexture,
+      depthCamera: state.camera
     });
+
+    if (!underwater) {
+      let impactBudget = 12;
+      impactBudget -= state.splashes.consumeImpacts(impactBudget, (x, z, strength) => {
+        state.oceanMat.addImpactPing(x, z, state.simTime_s, strength);
+      });
+      if (impactBudget > 0) {
+        const rainImpacts = state.precip.getImpactBuffer();
+        const count = Math.min(impactBudget, rainImpacts.count);
+        for (let i = 0; i < count; i++) {
+          const ix = i * 3;
+          state.oceanMat.addImpactPing(
+            rainImpacts.positions[ix + 0],
+            rainImpacts.positions[ix + 2],
+            state.simTime_s,
+            rainImpacts.strengths[i]
+          );
+        }
+      }
+    }
 
     state.windSpray.update({
       dt_s: dt,
@@ -1145,12 +1338,54 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       windDirTo_rad: state.windDirTo_rad,
       windSpeed_mps: wx.windSpeed_mps,
       gustiness: wx.gustiness,
+      gustStrength01,
+      gustFactor,
       storminess,
+      cloudCover: cc,
+      sunDir,
+      sunIntensity: sunVis,
+      sunset: twilight,
       rogueIntensity: rogueFx,
       visible: !underwater
     });
 
-    state.audio.updateFrame(dt, { U10: wx.windSpeed_mps, Hs: state.seaHs_m, rain: wx.precipIntensity });
+    const rainIntensity = clamp(wx.precipIntensity, 0, 1);
+    const windSprayIntensity = clamp(wx.windSpeed_mps / 26, 0, 1) * (0.35 + 0.65 * storminess);
+    const motionFade = 1.0 - smoothstep(0.15, 1.6, camSpeedEma);
+    const qualityScale =
+      state.params.quality === 'Max' ? 1.0 : (state.params.quality === 'High' ? 0.8 : (state.params.quality === 'Medium' ? 0.55 : 0.0));
+    const flashScale = state.params.reduceFlashes ? 0.6 : 1.0;
+    const underwaterScale = clamp(1.0 - underwaterBlend * 1.2, 0, 1);
+
+    const dropletTarget =
+      clamp(rainIntensity * 0.9 + sprayIntensity * 0.6 + windSprayIntensity * 0.35, 0, 1)
+      * motionFade
+      * qualityScale
+      * flashScale
+      * underwaterScale;
+    dropletStrength = lerp(dropletStrength, dropletTarget, clamp(dt * 2.5, 0, 1));
+
+    const dropletStreakTarget = clamp(rainIntensity * 0.8 + windSprayIntensity * 0.3, 0, 1);
+    dropletStreak = lerp(dropletStreak, dropletStreakTarget, clamp(dt * 2.0, 0, 1));
+
+    if (state.postFX.dropletPass) {
+      const dp = state.postFX.dropletPass as any;
+      dp.enabled = dropletStrength > 0.002;
+      dp.uniforms.u_time.value = state.simTime_s;
+      dp.uniforms.u_strength.value = dropletStrength;
+      dp.uniforms.u_streak.value = dropletStreak;
+    }
+
+    const rainImpact = state.precip.impactCount;
+    const splashImpact = state.splashes.impactCount;
+    state.audio.updateFrame(dt, {
+      U10: wx.windSpeed_mps,
+      Hs: state.seaHs_m,
+      rain: wx.precipIntensity,
+      rainImpact,
+      splashImpact
+    });
+    splashImpactPrev = splashImpact;
 
     state.params.derived_state = wx.stateName;
     state.params.derived_airTemp_C = Math.round(wx.airTemp_C * 10) / 10;
@@ -1212,6 +1447,8 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       lightningFlashFx,
       underwater
     });
+
+    state.otterDebug.update(dt, state.params);
 
     state.perfOverlay.update(dt, {
       dt_ms: dt * 1000,
@@ -1302,7 +1539,4 @@ function blendWaveSpectra(
 
 function waveCountForQuality(q: AppParams['quality']): number {
   if (q === 'Max') return 32;
-  if (q === 'High') return 32;
-  if (q === 'Medium') return 24;
-  return 16;
-}
+  if (q === 'High') ret

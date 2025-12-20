@@ -4,7 +4,8 @@ import type { OceanUniforms } from './oceanMaterial';
 export function applyOceanMaterialShader(
   shader: THREE.WebGLProgramParametersWithUniforms,
   uniforms: OceanUniforms,
-  maxWaves: number
+  maxWaves: number,
+  maxImpacts: number
 ): void {
   // Attach uniforms
   shader.uniforms.u_time = uniforms.u_time;
@@ -54,6 +55,12 @@ export function applyOceanMaterialShader(
   shader.uniforms.u_foamMap = uniforms.u_foamMap;
   shader.uniforms.u_foamCenter = uniforms.u_foamCenter;
   shader.uniforms.u_foamWorldSize = uniforms.u_foamWorldSize;
+
+  shader.uniforms.u_impactA = uniforms.u_impactA;
+  shader.uniforms.u_impactCount = uniforms.u_impactCount;
+  shader.uniforms.u_impactRadius = uniforms.u_impactRadius;
+  shader.uniforms.u_impactFade = uniforms.u_impactFade;
+  shader.uniforms.u_impactSmear = uniforms.u_impactSmear;
 
   shader.uniforms.u_wind = uniforms.u_wind;
   shader.uniforms.u_microNormal1 = uniforms.u_microNormal1;
@@ -287,6 +294,12 @@ export function applyOceanMaterialShader(
         uniform vec2 u_foamCenter;
         uniform float u_foamWorldSize;
 
+        uniform vec4 u_impactA[${maxImpacts}];
+        uniform float u_impactCount;
+        uniform float u_impactRadius;
+        uniform float u_impactFade;
+        uniform float u_impactSmear;
+
         uniform vec2 u_wind;
         uniform sampler2D u_microNormal1;
         uniform sampler2D u_microNormal2;
@@ -456,6 +469,37 @@ export function applyOceanMaterialShader(
         float foamFadeFar = u_foamWorldSize * 2.80;
         float foamFade = 1.0 - smoothstep(foamFadeNear, foamFadeFar, gDistXZ);
         foam *= foamFade;
+
+        // --- Droplet impact pings ---
+        float impactFoam = 0.0;
+        if (u_impactCount > 0.5) {
+          vec2 windV = u_wind;
+          float windLen = length(windV);
+          vec2 wDir = windLen > 1e-6 ? (windV / windLen) : vec2(1.0, 0.0);
+          vec2 wPerp = vec2(-wDir.y, wDir.x);
+          float stretch = 1.0 + clamp(windLen * 0.05, 0.0, 0.8);
+          float smearSpeed = u_impactSmear * windLen;
+          float baseRadius = max(0.05, u_impactRadius);
+          float fadeDen = max(u_impactFade, 1e-4);
+
+          for (int i = 0; i < ${maxImpacts}; i++) {
+            vec4 imp = u_impactA[i];
+            float age = u_time - imp.z;
+            float t = age / fadeDen;
+            float alive = step(0.0, t) * (1.0 - step(1.0, t));
+            float fade = (1.0 - t) * alive;
+
+            vec2 center = imp.xy + wDir * (smearSpeed * age);
+            vec2 d = vWorldXZ - center;
+            vec2 dWind = vec2(dot(d, wDir), dot(d, wPerp));
+            dWind.x /= stretch;
+            float r = length(dWind);
+            float radius = baseRadius * mix(0.75, 1.3, imp.w);
+            float disc = 1.0 - smoothstep(radius * 0.6, radius, r);
+            impactFoam += disc * fade * imp.w;
+          }
+        }
+        foam = clamp(foam + impactFoam * 0.35, 0.0, 1.0);
 
         // --- Water transmission tint (depth-based absorption + scattering) ---
         vec3 Nmacro = normalize(vWorldNormal);

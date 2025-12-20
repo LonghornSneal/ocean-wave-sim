@@ -16,14 +16,16 @@ import { WeatherSim } from './lib/weather';
 import { SeaOtter } from './lib/otter';
 import { CAMERA_FOV_DEG, OtterCameraRig } from './lib/otterCamera';
 import { PrecipitationSystem } from './lib/precip';
+import { RainMist } from './lib/rainMist';
 import { PerfOverlay } from './lib/perfOverlay';
 import { RogueWaveScheduler, buildSeismicPulse, type SeismicPulseState } from './lib/wavePhysics';
-import { applyCanvasSize } from './app/quality';
+import { applyCanvasSize, otterAnimationSettingsForQuality, precipBudgetForQuality, splashBudgetForQuality } from './app/quality';
 import { installRuntimeErrorOverlay } from './app/runtimeOverlay';
 import { AudioController } from './app/audioController';
 import { PlanarReflectionController } from './app/planarReflection';
 import { rebuildPostFX, type PostFXState } from './app/postfx';
 import { startAnimationLoop, type LoopControls, type LoopState } from './app/loop';
+import { createOtterDebugTools } from './app/otterDebug';
 import { createAtmosphere } from './app/atmosphere';
 import { createOceanSurface, foamRTSizeForQuality, foamWorldSizeForQuality, segmentsForQuality } from './app/oceanSetup';
 import { createWorldAssets } from './app/worldAssets';
@@ -146,8 +148,9 @@ bindSSRToOcean();
 
 const otter = new SeaOtter();
 scene.add(otter.group);
+const otterDebug = createOtterDebugTools(otter);
 
-// Otter appearance is tied to the single "Performance Mode" dropdown.
+// Otter appearance + animation detail are tied to the single "Performance Mode" dropdown.
 const otterModeForQuality = (q: AppParams['quality']): import('./lib/otter').OtterAppearanceMode => {
   if (q === 'Low') return 'Low';
   if (q === 'Medium') return 'Medium';
@@ -156,8 +159,18 @@ const otterModeForQuality = (q: AppParams['quality']): import('./lib/otter').Ott
 
 function applyOtterAppearance(): void {
   const mode = otterModeForQuality(params.quality);
-  const fur = mode === 'High' && params.otterFurSilhouette;
+  const animSettings = otterAnimationSettingsForQuality(params.quality);
+  const allowFur = mode === 'High' && animSettings.detail === 'Full';
+  let fur = allowFur && params.otterFurSilhouette;
+
+  if (!allowFur && params.otterFurSilhouette) {
+    params.otterFurSilhouette = false;
+    fur = false;
+    refreshGui();
+  }
+
   otter.setAppearance(mode, fur);
+  otter.setAnimationDetail(animSettings.detail, animSettings.clipRateHz);
 }
 
 applyOtterAppearance();
@@ -223,9 +236,11 @@ function updateSeismicPulse(): void {
 }
 
 const worldAssets = createWorldAssets(scene, params);
-const { life, cloudLayers, lightningBolts, lightningDir, islands, rainbow, splashes, windSpray, ripples, wakeRibbon, waterline } = worldAssets;
+const { life, cloudLayers, lightningBolts, lightningDir, islands, rainbow, windSpray, ripples, wakeRibbon, waterline } = worldAssets;
 const QUALITY_RANK = worldAssets.qualityRank;
+let splashes = worldAssets.splashes;
 let precip = worldAssets.precip;
+let rainMist = worldAssets.rainMist;
 
 // ---------- Planar reflection (water) ----------
 // A mirror-camera render target that provides stable horizon/sky/object reflections.
@@ -287,7 +302,7 @@ function applyQualityIfChanged(): void {
   // Pixel ratio — cap per performance mode (mobile friendly).
   applyCanvasSize(renderer, params.quality);
 
-  // Rebuild ocean geometry + precip particles for the new quality.
+  // Rebuild ocean geometry + particle systems for the new quality.
   const newGeo = new THREE.PlaneGeometry(12000, 12000, segmentsForQuality(params.quality), segmentsForQuality(params.quality));
   newGeo.rotateX(-Math.PI / 2);
   (ocean.geometry as THREE.BufferGeometry).dispose();
@@ -295,8 +310,18 @@ function applyQualityIfChanged(): void {
 
   scene.remove(precip.group);
   precip.dispose();
-  precip = new PrecipitationSystem(params.quality);
+  precip = new PrecipitationSystem(precipBudgetForQuality(params.quality));
   scene.add(precip.group);
+
+  scene.remove(splashes.points);
+  splashes.dispose();
+  splashes = new SplashSystem(splashBudgetForQuality(params.quality));
+  scene.add(splashes.points);
+
+  scene.remove(rainMist.points);
+  rainMist.dispose();
+  rainMist = new RainMist(params.quality);
+  scene.add(rainMist.points);
 
   postFX = rebuildPostFX(postFX, { renderer, scene, camera, ocean, params });
   bindSSRToOcean();
@@ -408,6 +433,9 @@ window.addEventListener('resize', () => {
     if (postFX.underwaterPass) {
       (postFX.underwaterPass as any).uniforms.u_resolution.value.set(window.innerWidth, window.innerHeight);
     }
+    if (postFX.dropletPass) {
+      (postFX.dropletPass as any).uniforms.u_resolution.value.set(window.innerWidth, window.innerHeight);
+    }
     if (postFX.grainPass) {
       const pixelRatio = renderer.getPixelRatio();
       (postFX.grainPass as any).uniforms.u_resolution.value.set(window.innerWidth * pixelRatio, window.innerHeight * pixelRatio);
@@ -464,6 +492,7 @@ window.addEventListener('beforeunload', () => {
   try { postFX.ssrPass?.dispose?.(); } catch { /* ignore */ }
   try { postFX.bloomPass?.dispose?.(); } catch { /* ignore */ }
   try { postFX.underwaterPass?.dispose?.(); } catch { /* ignore */ }
+  try { postFX.dropletPass?.dispose?.(); } catch { /* ignore */ }
   try { postFX.grainPass?.dispose?.(); } catch { /* ignore */ }
   try { postFX.gradePass?.dispose?.(); } catch { /* ignore */ }
   try { postFX.outputPass?.dispose?.(); } catch { /* ignore */ }
@@ -478,8 +507,10 @@ window.addEventListener('beforeunload', () => {
   audioController.dispose();
   rogueWarning.dispose();
   perfOverlay.dispose();
+  otterDebug.dispose();
   precip.dispose();
   splashes.dispose();
+  rainMist.dispose();
   windSpray.dispose();
   renderer.dispose();
 });
@@ -515,19 +546,24 @@ const loopState: LoopState = {
   camRig,
   otterOrbMesh,
   life,
-  precip,
+  get precip() { return precip; },
+  set precip(v) { precip = v; },
+  get rainMist() { return rainMist; },
+  set rainMist(v) { rainMist = v; },
   cloudLayers,
   qualityRank: QUALITY_RANK,
   lightningBolts,
   lightningDir,
   islands,
   rainbow,
-  splashes,
+  get splashes() { return splashes; },
+  set splashes(v) { splashes = v; },
   windSpray,
   ripples,
   wakeRibbon,
   waterline,
   perfOverlay,
+  otterDebug,
   pmrem,
   get envRT() { return envRT; },
   set envRT(v) { envRT = v; },

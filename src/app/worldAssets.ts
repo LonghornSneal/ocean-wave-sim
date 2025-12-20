@@ -2,20 +2,23 @@ import * as THREE from 'three';
 import type { AppParams } from '../lib/ui';
 import { biomeFor, OceanLife } from '../lib/life';
 import { PrecipitationSystem } from '../lib/precip';
-import { CloudDeck } from '../lib/clouds';
+import { CloudLayer } from '../lib/clouds';
 import { LightningBolts } from '../lib/lightningBolts';
 import { HorizonIslands } from '../lib/islands';
 import { RainbowArc } from '../lib/rainbow';
+import { RainMist } from '../lib/rainMist';
 import { SplashSystem } from '../lib/splashes';
 import { WindSpray } from '../lib/windSpray';
 import { OtterRipples } from '../lib/ripples';
 import { WakeRibbon } from '../lib/wakeRibbon';
 import { OtterWaterline } from '../lib/otterWaterline';
+import { precipBudgetForQuality, splashBudgetForQuality } from './quality';
 
 export type WorldAssets = {
   life: OceanLife;
   precip: PrecipitationSystem;
-  cloudLayers: Array<{ deck: CloudDeck; minQuality: AppParams['quality'] }>;
+  rainMist: RainMist;
+  cloudLayers: Array<{ deck: CloudLayer; minQuality: AppParams['quality'] }>;
   qualityRank: Record<AppParams['quality'], number>;
   lightningBolts: LightningBolts;
   lightningDir: THREE.Vector3;
@@ -39,51 +42,57 @@ export function createWorldAssets(scene: THREE.Scene, params: AppParams): WorldA
   scene.add(life.group);
 
   // Weather visuals
-  const precip = new PrecipitationSystem(params.quality);
+  const precip = new PrecipitationSystem(precipBudgetForQuality(params.quality));
   scene.add(precip.group);
 
-  const cloudsLow = new CloudDeck({
+  const rainMist = new RainMist(params.quality);
+  scene.add(rainMist.points);
+
+  const cloudsLow = new CloudLayer({
     layerOffset: -0.18,
-    densityScale: 1.1,
+    densityScale: 1.15,
     opacityScale: 1.0,
-    coverScale: 1.0,
-    stormScale: 1.05,
+    coverScale: 1.05,
+    stormCoverScale: 0.25,
+    stormScale: 1.2,
     rainScale: 1.0,
     windScale: 0.85,
-    stepsScale: 1.0
+    stepsScale: 1.0,
+    renderOrder: -10
   });
-  cloudsLow.mesh.renderOrder = -12;
   scene.add(cloudsLow.mesh);
 
-  const cloudsMid = new CloudDeck({
+  const cloudsMid = new CloudLayer({
     layerOffset: 0.22,
     densityScale: 0.85,
-    opacityScale: 0.7,
+    opacityScale: 0.65,
     coverScale: 0.78,
-    stormScale: 0.9,
+    stormCoverScale: 0.2,
+    stormScale: 0.95,
     rainScale: 0.75,
     windScale: 1.05,
-    stepsScale: 0.75
+    stepsScale: 0.75,
+    renderOrder: -11
   });
-  cloudsMid.mesh.renderOrder = -11;
   scene.add(cloudsMid.mesh);
 
-  const cloudsHigh = new CloudDeck({
+  const cloudsHigh = new CloudLayer({
     layerOffset: 0.68,
-    densityScale: 0.55,
-    opacityScale: 0.55,
-    coverScale: 0.58,
-    stormScale: 0.65,
-    rainScale: 0.45,
+    densityScale: 0.65,
+    opacityScale: 0.6,
+    coverScale: 0.5,
+    stormCoverScale: 0.6,
+    stormScale: 0.85,
+    rainScale: 0.4,
     windScale: 1.25,
-    stepsScale: 0.6
+    stepsScale: 0.65,
+    renderOrder: -12
   });
-  cloudsHigh.mesh.renderOrder = -10;
   scene.add(cloudsHigh.mesh);
 
   const cloudLayers = [
     { deck: cloudsLow, minQuality: 'Low' as AppParams['quality'] },
-    { deck: cloudsMid, minQuality: 'Medium' as AppParams['quality'] },
+    { deck: cloudsMid, minQuality: 'Low' as AppParams['quality'] },
     { deck: cloudsHigh, minQuality: 'High' as AppParams['quality'] }
   ];
 
@@ -98,7 +107,7 @@ export function createWorldAssets(scene: THREE.Scene, params: AppParams): WorldA
   const rainbow = new RainbowArc();
   scene.add(rainbow.mesh);
 
-  const splashes = new SplashSystem();
+  const splashes = new SplashSystem(splashBudgetForQuality(params.quality));
   scene.add(splashes.points);
 
   const windSpray = new WindSpray();
@@ -122,6 +131,7 @@ export function createWorldAssets(scene: THREE.Scene, params: AppParams): WorldA
   return {
     life,
     precip,
+    rainMist,
     cloudLayers,
     qualityRank,
     lightningBolts,

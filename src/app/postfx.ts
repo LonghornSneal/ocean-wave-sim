@@ -9,6 +9,8 @@ import { HeightFogPostPass } from '../lib/heightFogPass';
 import { UnderwaterPostPass } from '../lib/underwaterPass';
 import { GradeShader } from '../lib/grading';
 import { GrainDitherShader } from '../lib/grainDither';
+import { DropletOverlayShader } from '../lib/dropletOverlay';
+import { DROPLET_NORMAL_TEX } from '../lib/dropletNormals';
 import type { AppParams } from '../lib/ui';
 import { IS_MOBILE_LIKE } from './quality';
 
@@ -18,6 +20,7 @@ export type PostFXState = {
   heightFogPass: ShaderPass | null;
   underwaterPass: ShaderPass | null;
   bloomPass: UnrealBloomPass | null;
+  dropletPass: ShaderPass | null;
   grainPass: ShaderPass | null;
   gradePass: ShaderPass | null;
   outputPass: OutputPass | null;
@@ -45,6 +48,7 @@ export function rebuildPostFX(prev: PostFXState | null, args: {
   let heightFogPass: ShaderPass | null = null;
   let underwaterPass: ShaderPass | null = null;
   let bloomPass: UnrealBloomPass | null = null;
+  let dropletPass: ShaderPass | null = null;
   let grainPass: ShaderPass | null = null;
   let gradePass: ShaderPass | null = null;
   let outputPass: OutputPass | null = null;
@@ -58,6 +62,7 @@ export function rebuildPostFX(prev: PostFXState | null, args: {
       heightFogPass,
       underwaterPass,
       bloomPass,
+      dropletPass,
       grainPass,
       gradePass,
       outputPass,
@@ -164,6 +169,11 @@ export function rebuildPostFX(prev: PostFXState | null, args: {
       composer.addPass(bloomPass);
     }
 
+    dropletPass = new ShaderPass(DropletOverlayShader as any);
+    (dropletPass as any).uniforms.tNormal.value = DROPLET_NORMAL_TEX;
+    (dropletPass as any).uniforms.u_resolution.value.set(window.innerWidth, window.innerHeight);
+    composer.addPass(dropletPass);
+
     grainPass = new ShaderPass(GrainDitherShader as any);
     const pixelRatio = args.renderer.getPixelRatio();
     (grainPass as any).uniforms.u_resolution.value.set(window.innerWidth * pixelRatio, window.innerHeight * pixelRatio);
@@ -183,6 +193,7 @@ export function rebuildPostFX(prev: PostFXState | null, args: {
     heightFogPass = null;
     underwaterPass = null;
     bloomPass = null;
+    dropletPass = null;
     grainPass = null;
     gradePass = null;
     outputPass = null;
@@ -196,6 +207,7 @@ export function rebuildPostFX(prev: PostFXState | null, args: {
     heightFogPass,
     underwaterPass,
     bloomPass,
+    dropletPass,
     grainPass,
     gradePass,
     outputPass,
