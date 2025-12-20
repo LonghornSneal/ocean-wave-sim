@@ -17,6 +17,8 @@ export interface OtterCameraInputs {
   headPos: THREE.Vector3;
   eyePos: THREE.Vector3;
   surfaceHeight_m: number;
+  /** Optional filtered surface height for subtle camera heave (world-space Y). */
+  heaveTarget_m?: number;
   /** Mean sea level (tide offset). */
   seaLevel_m: number;
   underwater: boolean;
@@ -126,10 +128,4 @@ export class OtterCameraRig {
       this.initialized = true;
     } else {
       const tauLook = lerp(0.14, 0.24, storm);
-      const kLook = 1 - Math.exp(-dt / Math.max(1e-3, tauLook));
-      this.lookAtPos.lerp(desiredLook, kLook);
-    }
-
-    camera.lookAt(this.lookAtPos);
-  }
-}
+      const kLook = 1 - Math.exp(-dt / Math.max(1e-

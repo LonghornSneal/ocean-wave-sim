@@ -955,6 +955,7 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       headPos,
       eyePos,
       surfaceHeight_m: surf.height_m,
+      heaveTarget_m: state.otter.surfaceHeightFiltered_m,
       seaLevel_m: tideHeight_m,
       underwater: state.otter.isUnderwaterView(),
       storminess: clamp(wx.precipIntensity + wx.storminess + wx.hurricaneIntensity, 0, 1),

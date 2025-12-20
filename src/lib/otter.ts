@@ -519,13 +519,14 @@ export class SeaOtter {
     const wanderVec = this.tmpV2b.set(Math.cos(this.yaw), Math.sin(this.yaw)).multiplyScalar(0.028);
     drift.add(wanderVec);
 
-    const relVel = this.tmpV2c.copy(this.velocityXZ).sub(drift);
-    const relSpeed = relVel.length();
-    const submerge01 = clamp(0.35 + this.submerge_m * 0.85, 0.35, 1);
-    const dragCoeff = 6.0 * submerge01 * (1 + storm * 0.2);
-    const dragSpeed = Math.max(relSpeed, 0.05);
-    const dragStep = clamp((dragCoeff * relSpeed * relSpeed * dt) / dragSpeed, 0, 0.9);
-    this.velocityXZ.addScaledVector(relVel, -dragStep);
+    this.velocityXZ.addScaledVector(drift, dt);
+
+    const speed = this.velocityXZ.length();
+    const submerge01 = clamp(0.4 + this.submerge_m * 0.7, 0.4, 1);
+    const dragCoeff = 15.0 * submerge01 * (1 + storm * 0.2);
+    const dragSpeed = Math.max(speed, 0.05);
+    const dragStep = clamp((dragCoeff * speed * speed * dt) / dragSpeed, 0, 0.9);
+    this.velocityXZ.addScaledVector(this.velocityXZ, -dragStep);
 
     this.position.x += this.velocityXZ.x * dt;
     this.position.z += this.velocityXZ.y * dt;
@@ -603,6 +604,7 @@ export class SeaOtter {
     else waveNormal.set(0, 1, 0);
 
     const hAvg = (hF * fwdBackWeight + hB * fwdBackWeight + hL * sideWeight + hR * sideWeight + hC * centerWeight) / weightSum;
+    this.surfaceHeightFiltered_m = hAvg;
     const orbitalVelY = (vF * fwdBackWeight + vB * fwdBackWeight + vL * sideWeight + vR * sideWeight + vC * centerWeight) / weightSum;
 
     const pitchRaw = (hF - hB) / Math.max(1e-4, 2.0 * this.buoySampleFwd_m);
