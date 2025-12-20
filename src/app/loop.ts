@@ -15,7 +15,7 @@ import type { OtterCameraRig } from '../lib/otterCamera';
 import type { OceanLife } from '../lib/life';
 import type { PrecipitationSystem } from '../lib/precip';
 import type { RainMist } from '../lib/rainMist';
-import type { CloudDeck } from '../lib/clouds';
+import type { CloudLayer } from '../lib/clouds';
 import type { LightningBolts } from '../lib/lightningBolts';
 import type { HorizonIslands } from '../lib/islands';
 import type { RainbowArc } from '../lib/rainbow';
@@ -96,7 +96,7 @@ export type LoopState = {
   life: OceanLife;
   precip: PrecipitationSystem;
   rainMist: RainMist;
-  cloudLayers: Array<{ deck: CloudDeck; minQuality: AppParams['quality'] }>;
+  cloudLayers: Array<{ deck: CloudLayer; minQuality: AppParams['quality'] }>;
   qualityRank: Record<AppParams['quality'], number>;
   lightningBolts: LightningBolts;
   lightningDir: THREE.Vector3;
@@ -1275,7 +1275,7 @@ export function startAnimationLoop(state: LoopState): LoopControls {
     const sprayIntensity = clamp(
       (
         clamp(wx.windSpeed_mps / 20, 0, 1) * (0.25 + 0.75 * clamp(wx.storminess + wx.hurricaneIntensity, 0, 1)) * (1.0 + 0.90 * crossSea01)
-        + paddleImpulse01 * (0.20 + 0.25 * calmness)
+        + amplifiedImpulse01 * (0.20 + 0.25 * calmness)
         + state.otter.wetness01 * 0.25
       ),
       0,
@@ -1539,4 +1539,7 @@ function blendWaveSpectra(
 
 function waveCountForQuality(q: AppParams['quality']): number {
   if (q === 'Max') return 32;
-  if (q === 'High') ret
+  if (q === 'High') return 32;
+  if (q === 'Medium') return 24;
+  return 16;
+}

@@ -120,6 +120,7 @@ export type OtterAnimationDebugState = {
 export class SeaOtter {
   public readonly group: THREE.Group;
   public readonly position = new THREE.Vector3(0, 0, 0);
+  public surfaceHeightFiltered_m = 0;
 
   /** Where the otter is looking (drives camera aim). */
   public readonly gazeDir = new THREE.Vector3(0, 0.08, -1).normalize();
