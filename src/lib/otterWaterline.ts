@@ -287,7 +287,7 @@ export class OtterWaterline {
           const z = z0 + (z1 - z0) * tEdge;
           const h = h0 + (h1 - h0) * tEdge;
           const y = h + WATERLINE_OFFSET_M;
-          const edgeAbs = (Math.abs(d0) + Math.abs(d1)) * 0.5;
+          const edgeAbs = Math.min(Math.abs(d0), Math.abs(d1));
           const edgeStrength = 1.0 - smoothstep(WATERLINE_SURFACE_NEAR_M, WATERLINE_SURFACE_FAR_M, edgeAbs);
 
           ax = x; ay = y; az = z;
@@ -310,7 +310,7 @@ export class OtterWaterline {
           const z = z0 + (z1 - z0) * tEdge;
           const h = h0 + (h1 - h0) * tEdge;
           const y = h + WATERLINE_OFFSET_M;
-          const edgeAbs = (Math.abs(d1) + Math.abs(d2)) * 0.5;
+          const edgeAbs = Math.min(Math.abs(d1), Math.abs(d2));
           const edgeStrength = 1.0 - smoothstep(WATERLINE_SURFACE_NEAR_M, WATERLINE_SURFACE_FAR_M, edgeAbs);
 
           if (hitCount === 0) {
@@ -339,7 +339,7 @@ export class OtterWaterline {
           const z = z0 + (z1 - z0) * tEdge;
           const h = h0 + (h1 - h0) * tEdge;
           const y = h + WATERLINE_OFFSET_M;
-          const edgeAbs = (Math.abs(d2) + Math.abs(d0)) * 0.5;
+          const edgeAbs = Math.min(Math.abs(d2), Math.abs(d0));
           const edgeStrength = 1.0 - smoothstep(WATERLINE_SURFACE_NEAR_M, WATERLINE_SURFACE_FAR_M, edgeAbs);
 
           if (hitCount === 0) {
@@ -363,7 +363,7 @@ export class OtterWaterline {
             break;
           }
 
-          const segStrength = clamp((aStrength + bStrength) * 0.5, 0, 1);
+          const segStrength = clamp(Math.max(aStrength, bStrength), 0, 1);
           const segAlpha = lerp(WATERLINE_MIN_ALPHA, WATERLINE_MAX_ALPHA, segStrength);
           const halfWidth = lerp(WATERLINE_MIN_HALF_WIDTH_M, WATERLINE_MAX_HALF_WIDTH_M, segStrength);
 

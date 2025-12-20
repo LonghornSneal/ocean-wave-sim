@@ -19,6 +19,8 @@ export interface PrecipUpdate {
   otterPos?: THREE.Vector3;
   otterForward?: THREE.Vector3;
   windDirFrom_deg: number;
+  gustStrength01?: number;
+  gustFactor?: number;
   intensity: number; // 0..1
   mode: PrecipMode;
   visible: boolean;
@@ -33,6 +35,25 @@ export interface RainImpactBuffer {
   positions: Float32Array;
   strengths: Float32Array;
 }
+
+export type PrecipConfig = {
+  maxCount: number;
+  cullDistance: number;
+};
+
+const PRECIP_STRIDE = 20;
+const PRECIP_POS = 0;
+const PRECIP_VEL = 3;
+const PRECIP_SCALE = 6;
+const PRECIP_SPIN = 8;
+const PRECIP_SPAWN_Y = 9;
+const PRECIP_WOBBLE_PHASE = 10;
+const PRECIP_WOBBLE_AMP = 11;
+const PRECIP_WOBBLE_RATE = 12;
+const PRECIP_SLIDE_LIFE = 13;
+const PRECIP_SCALE_FACTOR = 14;
+const PRECIP_WOBBLE_XZ = 15;
+const PRECIP_TINT = 17;
 
 /** Simple precipitation particles around the camera. */
 export class PrecipitationSystem {

@@ -1,4 +1,4 @@
-import { clamp, lerp } from './math';
+import { clamp, lerp, smoothstep } from './math';
 
 export class OceanAudio {
   private ctx: AudioContext | null = null;
@@ -14,6 +14,10 @@ export class OceanAudio {
   private hissGain: GainNode | null = null;
 
   private rainGain: GainNode | null = null;
+
+  private bubbleFilter: BiquadFilterNode | null = null;
+  private bubbleBus: GainNode | null = null;
+  private bubbleNoise: AudioBuffer | null = null;
 
   private currentWind: number = 0;
   private currentWave: number = 0;
@@ -37,6 +41,7 @@ export class OceanAudio {
 
     // Shared white noise buffer (looped)
     const noiseBuffer = this.createNoiseBuffer(this.ctx, 2.0);
+    this.bubbleNoise = this.createNoiseBuffer(this.ctx, 0.25);
 
     // Wind: band-pass-ish
     const wind = this.ctx.createBufferSource();
@@ -116,6 +121,19 @@ export class OceanAudio {
     rainBP.connect(this.rainGain);
     this.rainGain.connect(this.master);
     rain.start();
+
+    // Bubble/foam grains: short noise bursts through a subtle high shelf.
+    this.bubbleFilter = this.ctx.createBiquadFilter();
+    this.bubbleFilter.type = 'highshelf';
+    this.bubbleFilter.frequency.value = 3200;
+    this.bubbleFilter.gain.value = 2.5;
+    this.bubbleFilter.Q.value = 0.6;
+
+    this.bubbleBus = this.ctx.createGain();
+    this.bubbleBus.gain.value = 0.35;
+
+    this.bubbleFilter.connect(this.bubbleBus);
+    this.bubbleBus.connect(this.master);
   }
 
   public async resume(): Promise<void> {
@@ -149,6 +167,8 @@ export class OceanAudio {
     try { this.waveGain?.disconnect(); } catch { /* ignore */ }
     try { this.hissGain?.disconnect(); } catch { /* ignore */ }
     try { this.rainGain?.disconnect(); } catch { /* ignore */ }
+    try { this.bubbleFilter?.disconnect(); } catch { /* ignore */ }
+    try { this.bubbleBus?.disconnect(); } catch { /* ignore */ }
     try { this.master?.disconnect(); } catch { /* ignore */ }
 
     this.windSrc = null;
@@ -159,6 +179,9 @@ export class OceanAudio {
     this.waveGain = null;
     this.hissGain = null;
     this.rainGain = null;
+    this.bubbleFilter = null;
+    this.bubbleBus = null;
+    this.bubbleNoise = null;
     this.master = null;
 
     try { await this.ctx.close(); } catch { /* ignore */ }
@@ -196,6 +219,58 @@ export class OceanAudio {
     this.waveGain.gain.value = this.currentWave;
     this.hissGain.gain.value = this.currentHiss;
     this.rainGain.gain.value = this.currentRain;
+
+    const bubbleHs = clamp(smoothstep(0.2, 1.1, H) * (1 - smoothstep(2.2, 3.6, H)), 0, 1);
+    const bubbleU = clamp(smoothstep(3.5, 6.5, U) * (1 - smoothstep(11, 17, U)), 0, 1);
+    const bubbleActivity = bubbleHs * bubbleU;
+    if (bubbleActivity > 0) {
+      const bubbleRate = bubbleActivity * 2.6;
+      const expected = bubbleRate * dt_s;
+      const count = Math.floor(expected);
+      const remainder = expected - count;
+      for (let i = 0; i < count; i++) {
+        this.triggerBubble(bubbleActivity);
+      }
+      if (Math.random() < remainder) {
+        this.triggerBubble(bubbleActivity);
+      }
+    }
+  }
+
+  private triggerBubble(intensity01: number): void {
+    if (!this.ctx || !this.bubbleNoise || !this.bubbleFilter || !this.bubbleBus) return;
+
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.bubbleNoise;
+
+    const rate = lerp(0.85, 1.7, Math.random());
+    src.playbackRate.value = rate;
+
+    const grainBufferDuration = lerp(0.03, 0.09, Math.random());
+    const realDuration = grainBufferDuration / rate;
+    const offsetMax = Math.max(0, this.bubbleNoise.duration - grainBufferDuration);
+    const offset = offsetMax > 0 ? Math.random() * offsetMax : 0;
+
+    const gain = this.ctx.createGain();
+    const now = this.ctx.currentTime;
+    const attack = Math.min(0.006, realDuration * 0.3);
+    const decay = Math.max(0.02, realDuration - attack);
+    const peak = lerp(0.02, 0.075, intensity01) * lerp(0.6, 1.05, Math.random());
+
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(peak, now + attack);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + attack + decay);
+
+    src.connect(gain);
+    gain.connect(this.bubbleFilter);
+
+    src.start(now, offset, grainBufferDuration);
+    src.stop(now + realDuration + 0.02);
+
+    src.onended = () => {
+      try { src.disconnect(); } catch { /* ignore */ }
+      try { gain.disconnect(); } catch { /* ignore */ }
+    };
   }
 
   private createNoiseBuffer(ctx: AudioContext, seconds: number): AudioBuffer {

@@ -76,6 +76,7 @@ export interface WeatherState {
 
   // Useful UI/logic readouts
   stormEta_h: number; // -1 if none scheduled
+  stormDuration_s: number; // 0 if none scheduled/active
   stormChanceEffective_pct: number;
   hurricaneChanceEffective_pct: number;
 }
@@ -494,6 +495,7 @@ export class WeatherSim {
       hurricaneCategory: cat,
       stateName,
       stormEta_h,
+      stormDuration_s: Math.max(0, this.stormDuration_s),
       stormChanceEffective_pct: Math.round(stormChanceEff * 100),
       hurricaneChanceEffective_pct: Math.round(chanceEff_pct)
     };

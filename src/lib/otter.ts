@@ -131,6 +131,9 @@ export class SeaOtter {
   /** 0..1 short pulse, used to boost wake/splashes when paddling. */
   public paddleImpulse01 = 0;
 
+  /** 0..1 boosted paddle impulse used for spray/foam. */
+  public paddleImpulseBoost01 = 0;
+
   /** 0..1 impact pulse emitted on paddle stroke hits. */
   public strokeImpact01 = 0;
 
@@ -604,7 +607,6 @@ export class SeaOtter {
     else waveNormal.set(0, 1, 0);
 
     const hAvg = (hF * fwdBackWeight + hB * fwdBackWeight + hL * sideWeight + hR * sideWeight + hC * centerWeight) / weightSum;
-    this.surfaceHeightFiltered_m = hAvg;
     const orbitalVelY = (vF * fwdBackWeight + vB * fwdBackWeight + vL * sideWeight + vR * sideWeight + vC * centerWeight) / weightSum;
 
     const pitchRaw = (hF - hB) / Math.max(1e-4, 2.0 * this.buoySampleFwd_m);

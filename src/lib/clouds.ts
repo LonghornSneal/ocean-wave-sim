@@ -19,6 +19,10 @@ export interface CloudUpdate {
   lightningFlash01: number;
   /** Direction from camera toward the active lightning flash (unit vector). */
   lightningDir: THREE.Vector3;
+  /** 0..1 lightning color temperature mix (cool -> hot). */
+  lightningTemp01: number;
+  /** Spatial falloff decay in noise space (higher = tighter). */
+  lightningDecay: number;
   storminess: number; // 0..1
   hurricaneIntensity: number; // 0..1
   precipIntensity: number; // 0..1
@@ -93,6 +97,7 @@ export class CloudLayer {
 
       u_cover: { value: 0.25 },
       u_storm: { value: 0.0 },
+      u_hurricane: { value: 0.0 },
       u_rain: { value: 0.0 },
 
       u_sunDir: { value: new THREE.Vector3(0, 1, 0) },
@@ -101,6 +106,8 @@ export class CloudLayer {
       u_night: { value: 0.0 },
       u_lightning: { value: 0.0 },
       u_lightningDir: { value: new THREE.Vector3(0, 1, 0) },
+      u_lightningTemp: { value: 0.0 },
+      u_lightningDecay: { value: 1.8 },
 
       // Smoothed opacity derived from cover
       u_opacity: { value: 0.0 },
@@ -140,6 +147,7 @@ export class CloudLayer {
 
         uniform float u_cover;
         uniform float u_storm;
+        uniform float u_hurricane;
         uniform float u_rain;
 
         uniform vec3  u_sunDir;
@@ -148,6 +156,8 @@ export class CloudLayer {
         uniform float u_night;
         uniform float u_lightning;
         uniform vec3  u_lightningDir;
+        uniform float u_lightningTemp;
+        uniform float u_lightningDecay;
 
         uniform float u_opacity;
         uniform float u_layerOffset;
@@ -297,8 +307,22 @@ export class CloudLayer {
           float flash = clamp(u_lightning, 0.0, 1.0);
           vec3 ldir = normalize(u_lightningDir);
           float lAlign = pow(clamp(dot(dir, ldir), 0.0, 1.0), 10.0);
+          float lightningTemp = clamp(u_lightningTemp, 0.0, 1.0);
+          float lightningDecay = max(u_lightningDecay, 0.0);
+          vec3 boltCool = vec3(0.65, 0.78, 1.00);
+          vec3 boltHot = vec3(0.97, 0.98, 1.00);
+          vec3 boltCol = mix(boltCool, boltHot, lightningTemp);
+          vec2 flashDirXZ = normalize(vec2(ldir.x, ldir.z));
+          vec3 flashSeed = ldir * 7.3 + vec3(1.7, 5.2, 9.1);
+          vec2 flashJitter = vec2(
+            hash13(flashSeed + vec3(2.1, 3.7, 5.9)),
+            hash13(flashSeed + vec3(7.3, 1.9, 4.4))
+          );
+          flashJitter = (flashJitter * 2.0 - 1.0) * 1.2;
+          vec2 flashCenter = flashDirXZ * 3.4 + flashJitter;
+          float backAlign = pow(clamp(dot(dir, -ldir), 0.0, 1.0), 1.25);
           // Global lift + strong local glow (so it doesn't brighten the whole dome).
-          baseCol += flash * vec3(0.10, 0.12, 0.16);
+          baseCol += flash * boltCol * 0.15;
 
           // Into-wind shelf band (directional, stronger near the horizon).
           vec2 windXZ = normalize(u_windDirXZ);
@@ -412,14 +436,20 @@ export class CloudLayer {
             // --- Lightning glow ---
             // Edge term acts like a crude silhouette detector (bright rims).
             float edge01 = pow(clamp(edge * 4.0, 0.0, 1.0), 0.75);
+            float backShadow = flash * backAlign * (0.04 + 0.10 * occ) * (1.0 - 0.6 * edge01);
+            stepCol *= (1.0 - backShadow);
+
             // Strongly localized to the flash direction, but keep a tiny ambient
             // contribution so the whole sky still "reads" as flashing.
             float bolt = flash * (0.12 + 0.88 * lAlign);
-            // Blue-white storm lightning.
-            vec3 boltCol = vec3(0.65, 0.78, 1.00);
+            float flashDist = length(p.xz - flashCenter);
+            float flashFalloff = exp(-flashDist * lightningDecay);
+            // Blend the falloff with edges to keep rims sharp.
+            float boltMask = mix(flashFalloff, 1.0, edge01);
             // Occlusion reduces interior glow so edges pop.
-            float boltShade = (0.25 + 0.75 * (1.0 - occ));
-            stepCol += boltCol * bolt * boltShade * (0.12 + 1.85 * edge01);
+            float boltShade = (0.22 + 0.78 * (1.0 - occ));
+            boltShade *= (0.75 + 0.25 * edge01);
+            stepCol += boltCol * bolt * boltShade * (0.12 + 1.85 * edge01) * boltMask;
 
             // Sun lighting: warmed by u_sunColor (set in main.ts) + forward scattering.
             vec3 sunCol = u_sunColor;
@@ -529,6 +559,8 @@ export class CloudLayer {
     this.uniforms.u_night.value = clamp(u.nightFactor, 0, 1);
     this.uniforms.u_lightning.value = clamp(u.lightningFlash01, 0, 1);
     this.uniforms.u_lightningDir.value.copy(u.lightningDir).normalize();
+    this.uniforms.u_lightningTemp.value = clamp(u.lightningTemp01, 0, 1);
+    this.uniforms.u_lightningDecay.value = Math.max(0, u.lightningDecay);
     this.uniforms.u_opacity.value = this.opacity;
     this.uniforms.u_steps.value = steps;
   }

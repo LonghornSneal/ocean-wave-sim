@@ -101,8 +101,34 @@ export class OtterCameraRig {
       this.waterY_m = seaLevel + this.waveOffset_m;
     }
 
+    // Subtle heave so the camera inherits some bob without aggressive motion.
+    let heaveAnchor: number | null = null;
+    if (typeof inp.heaveTarget_m === 'number' && Number.isFinite(inp.heaveTarget_m)) {
+      heaveAnchor = inp.heaveTarget_m;
+      if (inp.underwater) {
+        heaveAnchor = Math.max(heaveAnchor, inp.surfaceHeight_m);
+      }
+    }
+
+    const tauHeave = lerp(0.24, 0.38, storm);
+    const kHeave = 1 - Math.exp(-dt / Math.max(1e-3, tauHeave));
+    if (heaveAnchor !== null) {
+      const heaveRaw = heaveAnchor - this.waterY_m;
+      const heaveScale = lerp(0.22, 0.12, storm);
+      const heaveDesired = clamp(heaveRaw * heaveScale, -0.35, 0.35);
+      this.heaveOffset_m = this.initialized ? lerp(this.heaveOffset_m, heaveDesired, kHeave) : heaveDesired;
+    } else if (this.initialized) {
+      this.heaveOffset_m = lerp(this.heaveOffset_m, 0, kHeave);
+    } else {
+      this.heaveOffset_m = 0;
+    }
+
     // Keep camera at a stable observer height above the (smoothed) waterline.
-    desired.y = Math.max(this.waterY_m + observerHeight, this.waterY_m + 0.26);
+    desired.y = Math.max(this.waterY_m + observerHeight + this.heaveOffset_m, this.waterY_m + 0.26);
+    if (inp.underwater) {
+      const surfaceGuard = (heaveAnchor ?? inp.surfaceHeight_m) + 0.08;
+      desired.y = Math.max(desired.y, surfaceGuard);
+    }
 
     // More damping in storms (reduce shake instead of changing the framing).
     const tau = lerp(0.22, 0.38, storm);

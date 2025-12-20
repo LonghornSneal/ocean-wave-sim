@@ -5,14 +5,31 @@ import { SOFT_SPRITE_ALPHA, SPLASH_TEX } from './waterParticleTextures';
 
 export interface SplashUpdate {
   dt_s: number;
-  camera: THREE.Camera;
+  camera?: THREE.Camera;
   origin: THREE.Vector3;
   surfaceY: number;
   slope: number; // 0..1+
   intensity: number; // 0..1
+  gustStrength01: number; // 0..1
+  gustFactor: number; // >= 1
   windDirTo_rad: number;
+  sunDir?: THREE.Vector3;
+  sunIntensity?: number; // 0..1
+  sunset?: number; // 0..1
+  night?: number; // 0..1
+  storminess?: number; // 0..1
+  cloudCover?: number; // 0..1
+  pixelRatio?: number;
+  viewHeight_px?: number;
   /** 0..1. Bias spawn toward the otter body for spray. */
   sprayBias01?: number;
+  /** 0..1 pulse for paddle-driven micro bursts. */
+  paddleBurst01?: number;
+  /** Optional stroke direction for paddle micro bursts (XZ). */
+  paddleDirXZ?: THREE.Vector2;
+  visible?: boolean;
+  depthTexture?: THREE.DepthTexture | null;
+  depthCamera?: THREE.Camera | null;
 }
 
 export type SplashConfig = {
@@ -38,6 +55,12 @@ export class SplashSystem {
   private instanceBuffer: THREE.InstancedInterleavedBuffer;
   private geo: THREE.InstancedBufferGeometry;
   private idx = 0;
+  private visibility01 = 0;
+  private visibilityIntent = false;
+  private reseedPending = false;
+  private readonly visibilityFade_s = 0.7;
+  private readonly intensityOn = 0.06;
+  private readonly intensityOff = 0.03;
 
   private cullDistanceSq: number;
   private readonly boundsRadius = 12;
@@ -121,34 +144,54 @@ diffuseColor.a *= vOpacity;`
     (this.points.material as THREE.Material).dispose();
   }
 
+  public requestReseed(): void {
+    this.reseedPending = true;
+  }
+
   public update(u: SplashUpdate): void {
     const dt = u.dt_s;
     const mat = this.points.material as THREE.PointsMaterial;
+    const intensityRaw = clamp(u.intensity, 0, 1);
+    const inView = this.isVisible(u.camera, u.origin);
 
-    if (!this.isVisible(u.camera, u.origin)) {
+    if (this.visibilityIntent) {
+      if (intensityRaw <= this.intensityOff) this.visibilityIntent = false;
+    } else if (intensityRaw >= this.intensityOn) {
+      this.visibilityIntent = true;
+    }
+
+    const fade = clamp(dt / this.visibilityFade_s, 0, 1);
+    const targetVis = (inView && this.visibilityIntent && !this.reseedPending) ? 1 : 0;
+    this.visibility01 += (targetVis - this.visibility01) * fade;
+
+    if (this.reseedPending && this.visibility01 < 0.05) {
+      this.clearParticles();
+      this.reseedPending = false;
+    }
+
+    if (!inView) {
       this.points.visible = false;
       mat.opacity = 0.0;
       return;
     }
-    this.points.visible = true;
+    this.points.visible = this.visibility01 > 0.01;
 
     // Spawn rate based on steepness & intensity.
     const s = clamp((u.slope - 0.22) / 0.35, 0, 1);
     const spray = clamp(u.sprayBias01 ?? 0, 0, 1);
-    const rate = (s * s) * lerp(18, 120, u.intensity) * (0.85 + 0.9 * spray); // particles per second
+    const rate = (s * s) * lerp(18, 120, intensityRaw) * (0.85 + 0.9 * spray) * this.visibility01; // particles per second
 
     const toX = Math.cos(u.windDirTo_rad);
     const toZ = Math.sin(u.windDirTo_rad);
 
     const bodyY = Math.max(u.surfaceY + 0.05, u.origin.y + 0.12);
     const spawnY = lerp(u.surfaceY + 0.05, bodyY, spray);
-    const microBias = lerp(1.1, 1.8, u.intensity);
+    const microBias = lerp(1.1, 1.8, intensityRaw);
     const spawnN = Math.min(26, Math.floor(rate * dt * microBias));
-    for (let i = 0; i < spawnN; i++) this.spawn(u.origin, spawnY, toX, toZ, u.intensity, spray);
+    for (let i = 0; i < spawnN; i++) this.spawn(u.origin, spawnY, toX, toZ, intensityRaw, spray);
 
     // Update all particles
-    let any = false;
-    const windSpeed = lerp(0.45, 2.1, u.intensity) * (0.65 + 0.35 * s);
+    const windSpeed = lerp(0.45, 2.1, intensityRaw) * (0.65 + 0.35 * s);
     const windX = toX * windSpeed;
     const windZ = toZ * windSpeed;
     const turbAmp = 0.35 * dt;
@@ -161,7 +204,6 @@ diffuseColor.a *= vOpacity;`
         data[base + SPLASH_OPACITY] = 0;
         continue;
       }
-      any = true;
       data[base + SPLASH_LIFE] = life - dt;
       let vx = data[base + SPLASH_VEL + 0];
       let vy = data[base + SPLASH_VEL + 1];
@@ -199,8 +241,16 @@ diffuseColor.a *= vOpacity;`
 
     this.instanceBuffer.needsUpdate = true;
 
-    const targetOpacity = any ? clamp(0.15 + 0.55 * u.intensity, 0, 0.85) : 0;
-    mat.opacity += (targetOpacity - mat.opacity) * clamp(dt * 3.0, 0, 1);
+    const targetOpacity = clamp(0.15 + 0.55 * intensityRaw, 0, 0.85) * this.visibility01;
+    mat.opacity += (targetOpacity - mat.opacity) * fade;
+  }
+
+  private clearParticles(): void {
+    for (let i = 0; i < this.max; i++) {
+      const base = i * SPLASH_STRIDE;
+      this.data[base + SPLASH_LIFE] = 0;
+      this.data[base + SPLASH_OPACITY] = 0;
+    }
   }
 
   private isVisible(camera: THREE.Camera, origin: THREE.Vector3): boolean {
