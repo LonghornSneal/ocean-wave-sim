@@ -47,6 +47,7 @@ export class OtterCameraRig {
   // Smoothed waterline (prevents the camera from bobbing violently with every wave).
   private waterY_m = 0;
   private waveOffset_m = 0;
+  private heaveOffset_m = 0;
 
   private initialized = false;
 
@@ -128,4 +129,10 @@ export class OtterCameraRig {
       this.initialized = true;
     } else {
       const tauLook = lerp(0.14, 0.24, storm);
-      const kLook = 1 - Math.exp(-dt / Math.max(1e-
+      const kLook = 1 - Math.exp(-dt / Math.max(1e-3, tauLook));
+      this.lookAtPos.lerp(desiredLook, kLook);
+    }
+
+    camera.lookAt(this.lookAtPos);
+  }
+}
