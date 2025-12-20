@@ -9,6 +9,10 @@ export interface RipplesUpdate {
   calmness: number; // 0..1
   sunIntensity: number; // 0..1
   sunset: number; // 0..1
+  speed_mps?: number;
+  paddleImpulse01?: number;
+  motionDirXZ?: THREE.Vector2;
+  contact01?: number;
 }
 
 /**
@@ -77,6 +81,8 @@ export class OtterRipples {
 
           float alpha = a * u_intensity;
           gl_FragColor = vec4(col, alpha);
+          #include <tonemapping_fragment>
+          #include <colorspace_fragment>
         }
       `
     });
@@ -92,11 +98,23 @@ export class OtterRipples {
   }
 
   public update(u: RipplesUpdate): void {
-    // Strong when calm, fade during storms / heavy chop.
-    const target = clamp(u.calmness, 0, 1);
-    this.intensity = lerp(this.intensity, target, clamp(u.dt_s * 1.2, 0, 1));
+    const speed01 = clamp((u.speed_mps ?? 0) / 0.35, 0, 1);
+    const impulse01 = clamp(u.paddleImpulse01 ?? 0, 0, 1);
+    const contact01 = clamp(u.contact01 ?? 1, 0, 1);
+    const motion = clamp(0.15 + 0.85 * speed01 + 0.65 * impulse01, 0, 1);
 
-    this.mesh.position.set(u.center.x, u.surfaceY + 0.02, u.center.z);
+    // Strong when calm, fade during storms / heavy chop.
+    const target = clamp(u.calmness, 0, 1) * (0.25 + 0.75 * motion) * contact01;
+    this.intensity = lerp(this.intensity, target, clamp(u.dt_s * 1.8, 0, 1));
+
+    let px = u.center.x;
+    let pz = u.center.z;
+    if (u.motionDirXZ && u.motionDirXZ.lengthSq() > 1e-6) {
+      const offset = lerp(0.08, 0.45, speed01) * (0.5 + 0.5 * contact01);
+      px -= u.motionDirXZ.x * offset;
+      pz -= u.motionDirXZ.y * offset;
+    }
+    this.mesh.position.set(px, u.surfaceY + 0.02, pz);
 
     const mat = this.mesh.material as THREE.ShaderMaterial;
     mat.uniforms.u_time.value = u.time_s;
@@ -105,8 +123,8 @@ export class OtterRipples {
     mat.uniforms.u_sunset.value = clamp(u.sunset, 0, 1);
 
     // Slightly scale with calmness (gentler, wider ripples)
-    const s = lerp(0.95, 1.18, target);
+    const s = lerp(0.82, 1.12, clamp(u.calmness, 0, 1)) * lerp(0.92, 1.08, motion);
     this.mesh.scale.setScalar(s);
-    this.mesh.visible = this.intensity > 0.02;
+    this.mesh.visible = this.intensity > 0.02 && contact01 > 0.02;
   }
 }

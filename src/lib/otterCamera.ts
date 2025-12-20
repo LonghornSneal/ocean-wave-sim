@@ -1,5 +1,12 @@
 import * as THREE from 'three';
-import { clamp, lerp } from './math';
+import { clamp, lerp, radToDeg } from './math';
+
+const CAMERA_LENS_MM = 35;
+const CAMERA_SENSOR_HEIGHT_MM = 24;
+const DEFAULT_CAMERA_DISTANCE_M = 9.0;
+const DEFAULT_CAMERA_HEIGHT_M = 1.6;
+// 35mm full-frame equivalent vertical FOV (~38°) for natural scale cues.
+export const CAMERA_FOV_DEG = radToDeg(2 * Math.atan((CAMERA_SENSOR_HEIGHT_MM * 0.5) / CAMERA_LENS_MM));
 
 export interface OtterCameraInputs {
   dt_s: number;
@@ -30,7 +37,7 @@ export class OtterCameraRig {
   private readonly up = new THREE.Vector3(0, 1, 0);
 
   // Smoothed camera position (start at the default gameplay distance).
-  private camPos = new THREE.Vector3(0, 1.05, 9.0);
+  private camPos = new THREE.Vector3(0, DEFAULT_CAMERA_HEIGHT_M, DEFAULT_CAMERA_DISTANCE_M);
 
   // Smoothed look target to avoid jitter from gaze/head node noise.
   private lookAtPos = new THREE.Vector3(0, 1.2, 0);
@@ -59,13 +66,13 @@ export class OtterCameraRig {
     // Use bodyForward for camera position, and gazeDir only for where the camera looks.
     const storm = clamp(inp.storminess, 0, 1);
 
-    const baseDist = clamp(inp.followDistance_m ?? 9.0, 9.0, 18.0);
-    const baseElev = clamp(inp.followElevation_m ?? 1.05, 0.35, 3.0);
+    const baseDist = clamp(inp.followDistance_m ?? DEFAULT_CAMERA_DISTANCE_M, 9.0, 18.0);
+    const baseElev = clamp(inp.followElevation_m ?? DEFAULT_CAMERA_HEIGHT_M, 0.35, 3.0);
 
     // Keep the follow distance/elevation stable (avoid "shaky" feeling).
     // Storms slightly increase smoothing instead of changing the framing.
     const followDist = baseDist;
-    const followUp = baseElev;
+    const observerHeight = baseElev;
 
     const fwd = this.tmpFwd.copy(inp.bodyForward);
     fwd.y = 0;
@@ -75,9 +82,7 @@ export class OtterCameraRig {
     }
     fwd.normalize();
 
-    const desired = this.tmpPos.copy(inp.headPos)
-      .addScaledVector(fwd, -followDist)
-      .addScaledVector(this.up, followUp);
+    const desired = this.tmpPos.copy(inp.eyePos).addScaledVector(fwd, -followDist);
 
     // Smooth the waterline we clamp against so the camera doesn't "buzz" when
     // sampling a detailed wave field.
@@ -93,8 +98,8 @@ export class OtterCameraRig {
       this.waterY_m = seaLevel + this.waveOffset_m;
     }
 
-    // Keep camera just above the (smoothed) waterline.
-    desired.y = Math.max(desired.y, this.waterY_m + 0.26);
+    // Keep camera at a stable observer height above the (smoothed) waterline.
+    desired.y = Math.max(this.waterY_m + observerHeight, this.waterY_m + 0.26);
 
     // More damping in storms (reduce shake instead of changing the framing).
     const tau = lerp(0.22, 0.38, storm);
@@ -106,7 +111,7 @@ export class OtterCameraRig {
     }
 
     camera.position.copy(this.camPos);
-    camera.fov = lerp(camera.fov, 52, clamp(dt * 2.0, 0, 1));
+    camera.fov = lerp(camera.fov, CAMERA_FOV_DEG, clamp(dt * 2.0, 0, 1));
     camera.updateProjectionMatrix();
 
     const lookDist = 60;

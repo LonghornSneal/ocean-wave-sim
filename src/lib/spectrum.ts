@@ -47,12 +47,19 @@ export interface SpectrumInputs {
 
   /** Optional: fraction of total variance placed into the swell band (0..1). */
   swellVariance?: number;
+
+  /** Optional: swell significant wave height override (m). */
+  swellHs_m?: number;
+
+  /** Optional: swell peak period override (s). */
+  swellTp_s?: number;
 }
 
 export type WaveBandLabel = 'windSea' | 'windMid' | 'capillary' | 'swell' | 'tide' | 'seiche';
 
 export type WaveBandTag =
   | 'wind'
+  | 'chop'
   | 'swell'
   | 'capillary'
   | 'tide'
@@ -411,14 +418,23 @@ export function buildWaveComponents(inp: SpectrumInputs): WaveComponent[] {
   // the important high-frequency gravity-wave content, then capillary, then swell.
 
   const N = Math.floor(clamp(inp.waveCount, 4, 48));
-  const Hs = Math.max(0, inp.Hs_m);
+  let Hs = Math.max(0, inp.Hs_m);
+  const swellHsOverride = typeof inp.swellHs_m === 'number' && Number.isFinite(inp.swellHs_m)
+    ? Math.max(0, inp.swellHs_m)
+    : null;
+  if (swellHsOverride !== null) Hs = Math.max(Hs, swellHsOverride);
   const Tp = Math.max(0.5, inp.Tp_s);
   const fp = 1 / Tp;
   const windSpeed = Math.max(0, inp.windSpeed_mps ?? 0);
   const windSpec = windSpeed > 0.75 ? buildWindSeaSpectrumFromU10(windSpeed) : null;
   const wind01 = clamp(windSpeed / 26.0, 0, 1);
 
-  const swellVarInput = clamp(inp.swellVariance ?? 0.33, 0.0, 0.85);
+  let swellVarInput = clamp(inp.swellVariance ?? 0.33, 0.0, 0.85);
+  if (swellHsOverride !== null) {
+    const m0 = Math.pow(Hs / 4, 2);
+    const m0S = Math.pow(swellHsOverride / 4, 2);
+    swellVarInput = m0 > 1e-8 ? clamp(m0S / m0, 0.0, 0.85) : 0;
+  }
 
   // Direction spreads.
   // Use a much wider directional spread at high values so "cross seas" (waves
@@ -470,7 +486,8 @@ export function buildWaveComponents(inp: SpectrumInputs): WaveComponent[] {
     Tp_s: Tp,
     directionalSpread: ds,
     swellVariance: swellVar,
-    seed: swellSeed
+    seed: swellSeed,
+    targetTp_s: inp.swellTp_s
   });
 
   let fpS = swellSpec.fp_hz;
@@ -510,27 +527,27 @@ export function buildWaveComponents(inp: SpectrumInputs): WaveComponent[] {
 
   const bandWindPrimary: WaveBandMeta = {
     label: 'windSea',
-    tags: ['wind', 'breaking', 'foam', 'event', 'primary'],
+    tags: ['wind', 'chop', 'breaking', 'foam', 'event', 'primary'],
     crestSharpness: crestWind
   };
   const bandWindCross: WaveBandMeta = {
     label: 'windSea',
-    tags: ['wind', 'breaking', 'foam', 'event', 'cross'],
+    tags: ['wind', 'chop', 'breaking', 'foam', 'event', 'cross'],
     crestSharpness: crestWind * 0.95
   };
   const bandWindCounter: WaveBandMeta = {
     label: 'windSea',
-    tags: ['wind', 'breaking', 'foam', 'event', 'counter'],
+    tags: ['wind', 'chop', 'breaking', 'foam', 'event', 'counter'],
     crestSharpness: crestWind * 0.82
   };
   const bandWindMid: WaveBandMeta = {
     label: 'windMid',
-    tags: ['wind', 'breaking', 'foam', 'event'],
+    tags: ['wind', 'chop', 'breaking', 'foam', 'event'],
     crestSharpness: crestWindMid
   };
   const bandCapillary: WaveBandMeta = {
     label: 'capillary',
-    tags: ['capillary', 'wind'],
+    tags: ['capillary', 'wind', 'chop'],
     crestSharpness: crestCapillary
   };
   const bandSwell: WaveBandMeta = {

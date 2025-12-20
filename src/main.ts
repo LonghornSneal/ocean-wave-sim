@@ -14,7 +14,7 @@ import {
 } from './lib/ui';
 import { WeatherSim } from './lib/weather';
 import { SeaOtter } from './lib/otter';
-import { OtterCameraRig } from './lib/otterCamera';
+import { CAMERA_FOV_DEG, OtterCameraRig } from './lib/otterCamera';
 import { PrecipitationSystem } from './lib/precip';
 import { PerfOverlay } from './lib/perfOverlay';
 import { RogueWaveScheduler, buildSeismicPulse, type SeismicPulseState } from './lib/wavePhysics';
@@ -84,9 +84,9 @@ let envRT: THREE.WebGLRenderTarget | null = null;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
 
-const camera = new THREE.PerspectiveCamera(52, window.innerWidth / window.innerHeight, 0.1, 20000);
+const camera = new THREE.PerspectiveCamera(CAMERA_FOV_DEG, window.innerWidth / window.innerHeight, 0.1, 20000);
 // Start close + low (the otter camera rig will take over immediately).
-camera.position.set(0, 1.2, 2.5);
+camera.position.set(0, params.cameraElevation_m, 2.5);
 
 const {
   fogAbove,
@@ -123,6 +123,24 @@ let foamField = oceanSetup.foamField;
 // - Medium/High/Max: subtle cinematic grading (warm sunset tone, grain, vignette)
 // - Max: optional SSR reflections (best-effort; falls back gracefully)
 let postFX: PostFXState = rebuildPostFX(null, { renderer, scene, camera, ocean, params });
+const tmpSSRtexel = new THREE.Vector2();
+
+function bindSSRToOcean(): void {
+  const ssrPass = postFX.ssrPass as any;
+  const ssrTex = ssrPass?.ssrRenderTarget?.texture as THREE.Texture | undefined;
+  if (ssrTex) {
+    oceanMat.bindSSRReflection(ssrTex);
+    const w = Math.max(1, ssrPass?.ssrRenderTarget?.width ?? window.innerWidth);
+    const h = Math.max(1, ssrPass?.ssrRenderTarget?.height ?? window.innerHeight);
+    tmpSSRtexel.set(1 / w, 1 / h);
+    oceanMat.setSSRReflectionSampling({ texel: tmpSSRtexel, strength: 1.0 });
+  } else {
+    oceanMat.bindSSRReflection(null);
+    oceanMat.setSSRReflectionSampling({ strength: 0.0 });
+  }
+}
+
+bindSSRToOcean();
 
 // ---------- Otter + camera rig ----------
 
@@ -205,7 +223,7 @@ function updateSeismicPulse(): void {
 }
 
 const worldAssets = createWorldAssets(scene, params);
-const { life, cloudLayers, lightningBolts, lightningDir, islands, rainbow, splashes, windSpray, ripples, wakeRibbon } = worldAssets;
+const { life, cloudLayers, lightningBolts, lightningDir, islands, rainbow, splashes, windSpray, ripples, wakeRibbon, waterline } = worldAssets;
 const QUALITY_RANK = worldAssets.qualityRank;
 let precip = worldAssets.precip;
 
@@ -213,7 +231,7 @@ let precip = worldAssets.precip;
 // A mirror-camera render target that provides stable horizon/sky/object reflections.
 // SSR (Max tier) can still add subtle near-field contact reflections, but the planar
 // RT is the primary reflection path for the ocean shader.
-const reflectionHideList: THREE.Object3D[] = [ocean, ripples.mesh, wakeRibbon.mesh];
+const reflectionHideList: THREE.Object3D[] = [ocean, ripples.mesh, wakeRibbon.mesh, waterline.mesh];
 const planarReflections = new PlanarReflectionController(renderer, oceanMat, reflectionHideList);
 planarReflections.rebuild(params);
 
@@ -281,6 +299,7 @@ function applyQualityIfChanged(): void {
   scene.add(precip.group);
 
   postFX = rebuildPostFX(postFX, { renderer, scene, camera, ocean, params });
+  bindSSRToOcean();
   planarReflections.rebuild(params);
   loopControls?.resetEnvTimers();
 
@@ -385,9 +404,20 @@ window.addEventListener('resize', () => {
   try {
     postFX.composer?.setSize?.(window.innerWidth, window.innerHeight);
     postFX.ssrPass?.setSize?.(window.innerWidth, window.innerHeight);
+    postFX.bloomPass?.setSize?.(window.innerWidth, window.innerHeight);
     if (postFX.underwaterPass) {
       (postFX.underwaterPass as any).uniforms.u_resolution.value.set(window.innerWidth, window.innerHeight);
     }
+    if (postFX.grainPass) {
+      const pixelRatio = renderer.getPixelRatio();
+      (postFX.grainPass as any).uniforms.u_resolution.value.set(window.innerWidth * pixelRatio, window.innerHeight * pixelRatio);
+    }
+  } catch {
+    // ignore
+  }
+
+  try {
+    bindSSRToOcean();
   } catch {
     // ignore
   }
@@ -410,6 +440,7 @@ function handleContextRestored(): void {
   pmrem.compileCubemapShader?.();
 
   postFX = rebuildPostFX(postFX, { renderer, scene, camera, ocean, params });
+  bindSSRToOcean();
   planarReflections.rebuild(params);
 
   // Recreate GPU resources that rely on render targets.
@@ -431,8 +462,11 @@ window.addEventListener('beforeunload', () => {
   try { postFX.composer?.dispose?.(); } catch { /* ignore */ }
   try { postFX.composerDepthTex?.dispose?.(); } catch { /* ignore */ }
   try { postFX.ssrPass?.dispose?.(); } catch { /* ignore */ }
+  try { postFX.bloomPass?.dispose?.(); } catch { /* ignore */ }
   try { postFX.underwaterPass?.dispose?.(); } catch { /* ignore */ }
+  try { postFX.grainPass?.dispose?.(); } catch { /* ignore */ }
   try { postFX.gradePass?.dispose?.(); } catch { /* ignore */ }
+  try { postFX.outputPass?.dispose?.(); } catch { /* ignore */ }
   pmrem.dispose();
   planarReflections.dispose();
   foamField.dispose();
@@ -492,6 +526,7 @@ const loopState: LoopState = {
   windSpray,
   ripples,
   wakeRibbon,
+  waterline,
   perfOverlay,
   pmrem,
   get envRT() { return envRT; },

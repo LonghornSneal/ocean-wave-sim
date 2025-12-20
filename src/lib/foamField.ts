@@ -35,6 +35,8 @@ export interface FoamFieldUpdateOptions {
   wakePosXZ?: THREE.Vector2;
   wakeDirXZ?: THREE.Vector2;
   wakeStrength?: number; // 0..1-ish
+  wakeRadius?: number;
+  wakeLength?: number;
 }
 
 /**
@@ -421,6 +423,10 @@ export class FoamField {
 
     // Optional wake.
     const wakeStrength = clamp(opt.wakeStrength ?? 0, 0, 1.5);
+    const wakeRadius = clamp(opt.wakeRadius ?? this.uniforms.u_wakeRadius.value, 0.4, 6.0);
+    const wakeLength = clamp(opt.wakeLength ?? this.uniforms.u_wakeLength.value, 0.8, 12.0);
+    this.uniforms.u_wakeRadius.value = wakeRadius;
+    this.uniforms.u_wakeLength.value = wakeLength;
     if (wakeStrength > 0.0001 && opt.wakePosXZ && opt.wakeDirXZ) {
       this.tmpWakePos.copy(opt.wakePosXZ);
       this.tmpWakeDir.copy(opt.wakeDirXZ);

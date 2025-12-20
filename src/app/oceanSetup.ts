@@ -15,6 +15,51 @@ export const foamWorldSizeForQuality = (q: AppParams['quality']): number => (
   q === 'Max' ? 300 : (q === 'High' ? 260 : (q === 'Medium' ? 220 : 180))
 );
 
+export type OceanLodParams = {
+  fadeNear_m: number;
+  fadeFar_m: number;
+  wavelengthLong_m: number;
+  wavelengthShort_m: number;
+  lowBoost: number;
+};
+
+export const oceanLodForQuality = (q: AppParams['quality']): OceanLodParams => {
+  if (q === 'Low') {
+    return {
+      fadeNear_m: 350,
+      fadeFar_m: 1400,
+      wavelengthLong_m: 150,
+      wavelengthShort_m: 60,
+      lowBoost: 1.12
+    };
+  }
+  if (q === 'Medium') {
+    return {
+      fadeNear_m: 500,
+      fadeFar_m: 2000,
+      wavelengthLong_m: 120,
+      wavelengthShort_m: 48,
+      lowBoost: 1.08
+    };
+  }
+  if (q === 'High') {
+    return {
+      fadeNear_m: 650,
+      fadeFar_m: 2600,
+      wavelengthLong_m: 100,
+      wavelengthShort_m: 40,
+      lowBoost: 1.05
+    };
+  }
+  return {
+    fadeNear_m: 800,
+    fadeFar_m: 3200,
+    wavelengthLong_m: 90,
+    wavelengthShort_m: 36,
+    lowBoost: 1.03
+  };
+};
+
 export function createOceanSurface(renderer: THREE.WebGLRenderer, scene: THREE.Scene, params: AppParams): {
   ocean: THREE.Mesh;
   oceanMat: OceanMaterial;

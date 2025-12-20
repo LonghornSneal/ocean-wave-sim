@@ -350,6 +350,8 @@ export class CloudDeck {
           colAcc = mix(colAcc, vec3(grey), storm * 0.22);
 
           gl_FragColor = vec4(colAcc, alpha);
+          #include <tonemapping_fragment>
+          #include <colorspace_fragment>
         }
       `
     });

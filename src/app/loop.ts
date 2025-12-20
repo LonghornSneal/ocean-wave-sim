@@ -1,7 +1,9 @@
 import * as THREE from 'three';
 import type { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import type { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import type { SSRPass } from 'three/examples/jsm/postprocessing/SSRPass.js';
 import type { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+import type { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import type { Sky } from 'three/examples/jsm/objects/Sky.js';
 import type { WaveComponent } from '../lib/spectrum';
 import type { AppParams } from '../lib/ui';
@@ -20,21 +22,25 @@ import type { SplashSystem } from '../lib/splashes';
 import type { WindSpray } from '../lib/windSpray';
 import type { OtterRipples } from '../lib/ripples';
 import type { WakeRibbon } from '../lib/wakeRibbon';
+import type { OtterWaterline } from '../lib/otterWaterline';
 import type { PerfOverlay } from '../lib/perfOverlay';
 import type { OverlayWarning } from '../lib/overlay';
-import { clamp, degToRad, lerp } from '../lib/math';
+import { clamp, degToRad, lerp, smoothstep } from '../lib/math';
 import { computeCelestials } from '../lib/celestial';
 import {
   applyRogueToWaves,
+  beaufortFromMps,
+  beaufortToMps,
   buildSeicheComponents,
   buildTideComponent,
   computeDerivedFromU10,
   computeTide,
   predictWaveHsTpCEM,
-  pulseWindow01
+  pulseWindow01,
+  swellStateFromWindSpeed
 } from '../lib/wavePhysics';
 import type { RogueWaveScheduler, SeismicPulseState } from '../lib/wavePhysics';
-import { buildWaveComponents } from '../lib/spectrum';
+import { buildWaveComponents, waveHasAnyTag } from '../lib/spectrum';
 import { biomeFor } from '../lib/life';
 import { sampleGerstner } from '../lib/waveSample';
 import { moonPhaseFraction } from '../lib/ui';
@@ -42,13 +48,17 @@ import type { PlanarReflectionController } from './planarReflection';
 import type { AudioController } from './audioController';
 import { updateMoonPhase } from './skyHelpers';
 import { IS_MOBILE_LIKE } from './quality';
+import { oceanLodForQuality } from './oceanSetup';
 
 type PostFXState = {
   composer: EffectComposer | null;
   ssrPass: SSRPass | null;
   heightFogPass: ShaderPass | null;
   underwaterPass: ShaderPass | null;
+  bloomPass: UnrealBloomPass | null;
+  grainPass: ShaderPass | null;
   gradePass: ShaderPass | null;
+  outputPass: OutputPass | null;
 };
 
 export type LoopState = {
@@ -91,6 +101,7 @@ export type LoopState = {
   windSpray: WindSpray;
   ripples: OtterRipples;
   wakeRibbon: WakeRibbon;
+  waterline: OtterWaterline;
   perfOverlay: PerfOverlay;
   pmrem: THREE.PMREMGenerator;
   get envRT(): THREE.WebGLRenderTarget | null;
@@ -158,12 +169,20 @@ const colDeep = new THREE.Color('#052436');
 const colGreen = new THREE.Color('#0a3a32');
 const colNearMix = new THREE.Color('#062b3f');
 const tmpWaterCol = new THREE.Color();
+const tmpAbsorptionCol = new THREE.Color();
 
 const hazeBaseCol = new THREE.Color('#6a86a8');
 const hazeSunsetCol = new THREE.Color('#f2b17b');
 const hazeStormCol = new THREE.Color('#3a445c');
 const hazeNightCol = new THREE.Color('#05070c');
 const tmpHazeCol = new THREE.Color();
+
+const lightningCoolCol = new THREE.Color('#dbe9ff');
+const lightningHotCol = new THREE.Color('#f7fbff');
+const ambientSkyBaseCol = new THREE.Color('#88aaff');
+const ambientGroundBaseCol = new THREE.Color('#0b1020');
+const ambientFlashGroundCol = new THREE.Color('#1a2233');
+const tmpLightningCol = new THREE.Color();
 
 // Fixed primary light (moon) to align highlights/reflections.
 const PRIMARY_LIGHT_DIR = new THREE.Vector3(-0.45, 0.55, 0.70).normalize();
@@ -195,6 +214,12 @@ export function startAnimationLoop(state: LoopState): LoopControls {
   let lightningFlashFx = 0;
   let lightningBurstPulses = 0;
   let lightningNextPulse_s = 0;
+  let lightningEventTimer_s = 0;
+  let lightningPulseTime_s = -1;
+  let lightningPulseRise_s = 0.015;
+  let lightningPulseDecay_s = 0.08;
+  let lightningPulseAmp = 0;
+  let lightningSkyGlow = 0;
   let currentBiome = biomeFor(state.params.latitude_deg, 12);
   const rogueWaves: WaveComponent[] = [];
 
@@ -296,6 +321,17 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       hurricaneChanceAdjust_pct: state.params.hurricaneChanceAdjust_pct
     });
 
+    const manualWind = state.params.windSpeedMode === 'Manual';
+    if (manualWind) {
+      const bft = clamp(state.params.windSpeedBeaufort, 0, 12);
+      state.params.windSpeedBeaufort = bft;
+      wx.windSpeed_mps = beaufortToMps(bft);
+    } else {
+      const bft = beaufortFromMps(wx.windSpeed_mps);
+      state.params.windSpeedBeaufort = Math.round(bft * 10) / 10;
+    }
+    const swellFromWind = swellStateFromWindSpeed(wx.windSpeed_mps);
+
     const phaseFrac = moonPhaseFraction(state.params.moonPhaseName);
     const cel = computeCelestials({
       latitude_deg: state.params.latitude_deg,
@@ -322,19 +358,16 @@ export function startAnimationLoop(state: LoopState): LoopControls {
 
     const cc = clamp(wx.cloudCover, 0, 1);
 
-    state.skyUniforms['rayleigh'].value = lerp(0.65, 2.7, 1 - cc) * lerp(1.0, 0.55, sunset);
-    state.skyUniforms['turbidity'].value = lerp(6, 16, cc) + sunset * lerp(2, 10, 1 - cc);
-    state.skyUniforms['mieCoefficient'].value = lerp(0.004, 0.02, cc) + sunset * 0.012;
-    state.skyUniforms['mieDirectionalG'].value = lerp(0.82, 0.92, cc) + sunset * 0.02;
-
-    state.skyUniforms['sunPosition'].value.copy(sunDir).multiplyScalar(10000);
+    const rayleighBase = lerp(0.65, 2.7, 1 - cc) * lerp(1.0, 0.55, sunset);
+    const turbidityBase = lerp(6, 16, cc) + sunset * lerp(2, 10, 1 - cc);
+    const mieBase = lerp(0.004, 0.02, cc) + sunset * 0.012;
+    const mieGBase = lerp(0.82, 0.92, cc) + sunset * 0.02;
 
     const sunVis = clamp(PRIMARY_LIGHT_INTENSITY * (1 - 0.35 * cc), 0, 1);
 
     state.tmpSunColor.copy(PRIMARY_LIGHT_COLOR);
     state.sunLight.color.copy(state.tmpSunColor);
     state.moonLight.color.copy(state.tmpSunColor);
-    state.lightningLight.color.copy(state.tmpSunColor);
 
     state.sunLight.intensity = 0.0;
     state.sunLight.position.copy(sunDir).multiplyScalar(100);
@@ -342,31 +375,47 @@ export function startAnimationLoop(state: LoopState): LoopControls {
     state.moonLight.intensity = sunVis;
     state.moonLight.position.copy(moonDir).multiplyScalar(100);
 
-    state.ambient.intensity = lerp(0.25, 0.62, 1 - night) * lerp(1.0, 0.72, cc);
-    state.lightningDir.copy(sunDir);
+    const ambientBase = lerp(0.25, 0.62, 1 - night) * lerp(1.0, 0.72, cc);
 
     const storminessFx = clamp(wx.storminess * 0.85 + wx.precipIntensity * 0.65 + wx.hurricaneIntensity * 1.0, 0, 1);
     const flashLimiter = state.params.reduceFlashes ? 0.35 : 1.0;
-    const lightningRate_hz = lerp(0.03, 0.85, Math.pow(storminessFx, 1.35)) * flashLimiter;
+    const lightningRate_hz = lerp(0.02, 0.65, Math.pow(storminessFx, 1.35)) * flashLimiter;
 
-    lightningFlash01 *= Math.exp(-dt * 10.5);
+    if (lightningBurstPulses <= 0 && lightningPulseTime_s < 0) {
+      if (lightningRate_hz > 1e-4) {
+        lightningEventTimer_s -= dt;
+        if (lightningEventTimer_s <= 0) {
+          const burstBase = 1 + Math.floor(Math.random() * 2);
+          const burstExtra = Math.random() < lerp(0.35, 0.75, storminessFx) ? 1 : 0;
+          const burstExtra2 = storminessFx > 0.7 && Math.random() < 0.45 ? 1 : 0;
+          lightningBurstPulses = burstBase + burstExtra + burstExtra2;
+          lightningNextPulse_s = 0;
 
-    lightningNextPulse_s -= dt;
-    if (lightningBurstPulses <= 0) {
-      if (Math.random() < lightningRate_hz * dt) {
-        lightningBurstPulses = 2 + Math.floor(Math.random() * 4);
-        lightningNextPulse_s = 0;
+          const yaw = Math.random() * Math.PI * 2.0;
+          const pitch = lerp(0.18, 0.55, Math.random());
+          const cosP = Math.cos(pitch);
+          state.lightningDir.set(Math.cos(yaw) * cosP, Math.sin(pitch), Math.sin(yaw) * cosP).normalize();
+
+          const rate = Math.max(1e-4, lightningRate_hz);
+          const minGap = lerp(1.0, 0.35, storminessFx);
+          const u = Math.max(1e-6, Math.random());
+          lightningEventTimer_s = Math.max(minGap, -Math.log(u) / rate);
+        }
+      } else {
+        lightningEventTimer_s = 0;
       }
     }
 
+    lightningNextPulse_s -= dt;
     if (lightningBurstPulses > 0 && lightningNextPulse_s <= 0) {
       lightningBurstPulses -= 1;
-      lightningNextPulse_s = lerp(0.05, 0.18, Math.random());
-      lightningFlash01 = Math.max(lightningFlash01, lerp(0.65, 1.0, Math.random()));
+      lightningNextPulse_s = lerp(0.06, 0.18, Math.random()) * lerp(1.1, 0.75, storminessFx);
+      lightningPulseTime_s = 0;
+      lightningPulseRise_s = lerp(0.008, 0.02, Math.random());
+      lightningPulseDecay_s = lerp(0.06, 0.14, Math.random());
+      lightningPulseAmp = lerp(0.65, 1.0, Math.random()) * lerp(0.75, 1.0, storminessFx);
 
-      state.lightningDir.copy(sunDir);
-
-      state.lightningLight.position.copy(state.camera.position).addScaledVector(sunDir, 220);
+      state.lightningLight.position.copy(state.camera.position).addScaledVector(state.lightningDir, 220);
       state.lightningLight.target.position.copy(state.camera.position);
 
       const strikeCount = Math.random() < lerp(0.25, 0.6, storminessFx) ? 2 : 1;
@@ -380,8 +429,45 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       }
     }
 
+    let lightningPulse01 = 0;
+    if (lightningPulseTime_s >= 0) {
+      lightningPulseTime_s += dt;
+      const t = lightningPulseTime_s;
+      if (t <= lightningPulseRise_s) {
+        lightningPulse01 = lightningPulseRise_s > 1e-5 ? (t / lightningPulseRise_s) : 1.0;
+      } else {
+        const fallT = t - lightningPulseRise_s;
+        lightningPulse01 = Math.exp(-fallT / Math.max(1e-4, lightningPulseDecay_s));
+      }
+      if (t >= lightningPulseRise_s + lightningPulseDecay_s * 3.2) {
+        lightningPulseTime_s = -1;
+      }
+    }
+
+    lightningFlash01 = Math.max(lightningFlash01 * Math.exp(-dt * 9.0), lightningPulse01 * lightningPulseAmp);
+    lightningSkyGlow = Math.max(lightningSkyGlow * Math.exp(-dt * 3.0), lightningFlash01 * 0.65);
+
     lightningFlashFx = lightningFlash01 * flashLimiter;
-    const lightningIntensity = lightningFlashFx * lerp(4.0, 32.0, storminessFx);
+    const lightningSkyFx = clamp(lightningSkyGlow * flashLimiter, 0, 1);
+    const lightningColorMix = clamp(Math.pow(lightningFlashFx, 0.35), 0, 1);
+    tmpLightningCol.copy(lightningCoolCol).lerp(lightningHotCol, lightningColorMix);
+    state.lightningLight.color.copy(tmpLightningCol);
+
+    const skyFlash = clamp(lightningSkyFx, 0, 1);
+    state.skyUniforms['rayleigh'].value = lerp(rayleighBase, rayleighBase * 0.75, skyFlash);
+    state.skyUniforms['turbidity'].value = lerp(turbidityBase, turbidityBase * 0.7 + 1.5, skyFlash);
+    state.skyUniforms['mieCoefficient'].value = lerp(mieBase, mieBase + 0.02, skyFlash);
+    state.skyUniforms['mieDirectionalG'].value = lerp(mieGBase, 0.94, skyFlash);
+
+    state.skyUniforms['sunPosition'].value.copy(sunDir).multiplyScalar(10000);
+    state.skyUniforms['u_cloudCover'].value = cc;
+    state.skyUniforms['u_cloudTime'].value = state.simTime_s;
+
+    state.ambient.intensity = ambientBase * (1.0 + 0.6 * skyFlash);
+    state.ambient.color.copy(ambientSkyBaseCol).lerp(tmpLightningCol, skyFlash * 0.65);
+    state.ambient.groundColor.copy(ambientGroundBaseCol).lerp(ambientFlashGroundCol, skyFlash * 0.4);
+
+    const lightningIntensity = lightningFlashFx * lerp(2.5, 18.0, storminessFx);
     state.lightningLight.intensity = lightningIntensity;
     state.lightningBolts.update({ dt_s: dt });
 
@@ -470,7 +556,10 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       windRamp_h: wx.windRamp_h
     };
 
-    const waveState = predictWaveHsTpCEM(derived, stormIn, oceanIn);
+    const waveStateBase = predictWaveHsTpCEM(derived, stormIn, oceanIn);
+    const waveState = manualWind
+      ? { ...waveStateBase, Hs_m: swellFromWind.swellHeight_m, Tp_s: swellFromWind.swellPeriod_s }
+      : waveStateBase;
 
     const storminess = clamp(Math.max(wx.precipIntensity, wx.storminess, wx.hurricaneIntensity), 0, 1);
     const seaResponse = clamp(storminess * 0.85 + wx.gustiness * 0.35, 0, 1);
@@ -478,8 +567,10 @@ export function startAnimationLoop(state: LoopState): LoopControls {
     const kSea = 1 - Math.exp(-dt / Math.max(1e-3, tauSea));
 
     const dramatic = clamp(storminess * 0.95 + wx.hurricaneIntensity * 0.6 + wx.gustiness * 0.35, 0, 1);
-    const HsTarget = clamp(waveState.Hs_m * lerp(1.0, 2.25, Math.pow(dramatic, 1.45)), 0.4, 24.0);
-    const TpTarget = clamp(waveState.Tp_s * lerp(1.0, 1.32, Math.pow(dramatic, 1.25)), 3.5, 22.0);
+    const HsBase = waveState.Hs_m * lerp(1.0, 2.25, Math.pow(dramatic, 1.45));
+    const TpBase = waveState.Tp_s * lerp(1.0, 1.32, Math.pow(dramatic, 1.25));
+    const HsTarget = clamp(Math.max(HsBase, swellFromWind.swellHeight_m), 0.4, 24.0);
+    const TpTarget = clamp(TpBase, 3.5, 22.0);
 
     state.seaHs_m = lerp(state.seaHs_m, HsTarget, kSea);
     state.seaTp_s = lerp(state.seaTp_s, TpTarget, kSea);
@@ -513,7 +604,8 @@ export function startAnimationLoop(state: LoopState): LoopControls {
     const baseWaveCount = Math.max(4, waveCountForQuality(state.params.quality) - seicheCount - tideCount);
 
     const buildWaveTarget = (): WaveComponent[] => {
-      const base = buildWaveComponents({
+      // Wave spectrum inputs (JONSWAP-derived Gerstner stack).
+      const spectrumInputs = {
         Hs_m: state.seaHs_m,
         Tp_s: state.seaTp_s,
         depth_m: state.params.depth_m,
@@ -521,6 +613,8 @@ export function startAnimationLoop(state: LoopState): LoopControls {
         windSpeed_mps: wx.windSpeed_mps,
         swellDirTo_rad: state.swellDirTo_rad,
         swellVariance: swellVar,
+        swellHs_m: swellFromWind.swellHeight_m,
+        swellTp_s: swellFromWind.swellPeriod_s,
         waveCount: baseWaveCount,
         directionalSpread,
         gamma: lerp(1.6, 4.2, clamp(wx.storminess + wx.hurricaneIntensity, 0, 1)),
@@ -530,7 +624,9 @@ export function startAnimationLoop(state: LoopState): LoopControls {
         capillaryDirectionalSpread: state.params.capillaryDirectionalSpread,
         capillaryWaveCount: state.params.capillaryWaveCount,
         seed: 1337
-      });
+      };
+      const base = buildWaveComponents(spectrumInputs);
+      blendWaveSpectra(base, wx.windSpeed_mps, state.params.windSeaIntensity, state.params.swellIntensity);
 
       if (!seicheEnabled) {
         base.push(tideComponent);
@@ -616,9 +712,12 @@ export function startAnimationLoop(state: LoopState): LoopControls {
 
     tmpWindXZ.set(Math.cos(state.windDirTo_rad) * wx.windSpeed_mps, Math.sin(state.windDirTo_rad) * wx.windSpeed_mps);
     const qMicro = state.params.quality === 'Max' ? 1.0 : state.params.quality === 'High' ? 0.85 : state.params.quality === 'Medium' ? 0.65 : 0.45;
-    const microStrength = (0.04 + 0.08 * wind01) * qMicro * (1.0 - 0.35 * storminess);
+    const microStrength = (0.04 + 0.08 * wind01) * qMicro * (1.0 - 0.35 * storminess)
+      * clamp(state.params.microNormalStrength, 0, 2.5);
+    const microScale = clamp(state.params.microNormalScale, 0.25, 2.5);
     const microFadeNear = state.params.quality === 'Low' ? 35 : state.params.quality === 'Medium' ? 55 : state.params.quality === 'High' ? 70 : 80;
     const microFadeFar = state.params.quality === 'Low' ? 170 : state.params.quality === 'Medium' ? 250 : state.params.quality === 'High' ? 320 : 400;
+    const lod = oceanLodForQuality(state.params.quality);
 
     state.oceanMat.update(dt, {
       time_s: state.simTime_s,
@@ -626,15 +725,24 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       currentXZ,
       tideHeight_m,
       waterClarity: clarity,
+      waterDepth_m: state.params.depth_m,
+      absorptionColor: tmpAbsorptionCol.set(state.params.absorptionColor),
+      absorptionDistance_m: state.params.absorptionDistance_m,
       foamIntensity,
       foamSlopeStart,
       foamSlopeEnd,
       rogueIntensity: rogueFx,
       windSeaIntensity: state.params.windSeaIntensity,
       swellIntensity: state.params.swellIntensity,
+      lodFadeNear_m: lod.fadeNear_m,
+      lodFadeFar_m: lod.fadeFar_m,
+      lodWavelengthLong_m: lod.wavelengthLong_m,
+      lodWavelengthShort_m: lod.wavelengthShort_m,
+      lodLowBoost: lod.lowBoost,
       pulse: state.seismicPulse,
 
       windXZ: tmpWindXZ,
+      microScale,
       microStrength,
       microFadeNear_m: microFadeNear,
       microFadeFar_m: microFadeFar,
@@ -642,7 +750,10 @@ export function startAnimationLoop(state: LoopState): LoopControls {
 
       sunDir,
       sunColor: state.sunLight.color,
-      sunIntensity: sunVis
+      sunIntensity: sunVis,
+      lightningDir: state.lightningDir,
+      lightningColor: tmpLightningCol,
+      lightningIntensity: lightningFlashFx
     });
 
     const otterosity = clamp(state.params.otterosity_pct / 100, 0, 1);
@@ -668,15 +779,29 @@ export function startAnimationLoop(state: LoopState): LoopControls {
     );
 
     tmpOtterXZ.set(state.otter.position.x, state.otter.position.z);
+    let dx = 0;
+    let dz = 0;
     if (dt > 1e-6) {
-      const dx = tmpOtterXZ.x - state.otterPrevXZ.x;
-      const dz = tmpOtterXZ.y - state.otterPrevXZ.y;
+      dx = tmpOtterXZ.x - state.otterPrevXZ.x;
+      dz = tmpOtterXZ.y - state.otterPrevXZ.y;
       state.otterSpeed_mps = Math.sqrt(dx * dx + dz * dz) / dt;
     } else {
       state.otterSpeed_mps = 0;
     }
     state.otterPrevXZ.copy(tmpOtterXZ);
-    tmpOtterDirXZ.set(state.otter.bodyForward.x, state.otter.bodyForward.z);
+
+    const useVelDir = state.otterSpeed_mps > 0.02 && (dx * dx + dz * dz) > 1e-8;
+    if (useVelDir) {
+      tmpV2b.set(dx, dz);
+    } else {
+      tmpV2b.set(state.otter.bodyForward.x, state.otter.bodyForward.z);
+    }
+    if (tmpV2b.lengthSq() > 1e-8) tmpV2b.normalize();
+    else tmpV2b.set(0, 1);
+    const dirSmooth = clamp(dt * (useVelDir ? 7.0 : 2.0), 0, 1);
+    tmpOtterDirXZ.lerp(tmpV2b, dirSmooth);
+    if (tmpOtterDirXZ.lengthSq() > 1e-8) tmpOtterDirXZ.normalize();
+    else tmpOtterDirXZ.copy(tmpV2b);
 
     const surf = sampleGerstner(
       state.wavesCurrent,
@@ -703,6 +828,12 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       state.seismicPulse,
       { includeTags: ['event'], applyCrestSharpness: true }
     );
+    const paddleImpulse01 = (state.otter as any).paddleImpulse01 ?? 0;
+    const bodyWaterlineOffset_m = 0.12;
+    const depth_m = surf.height_m - (state.otter.position.y - bodyWaterlineOffset_m);
+    const surfaceGate = smoothstep(0.0, 0.20, depth_m);
+    const deepGate = 1.0 - smoothstep(0.28, 0.70, depth_m);
+    const contact01 = clamp(surfaceGate * deepGate, 0, 1);
     const headPos = state.otter.getHeadWorldPosition(tmpV3c);
     const eyePos = state.otter.getEyeWorldPosition(tmpV3d);
 
@@ -745,7 +876,11 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       surfaceY: surf.height_m,
       calmness,
       sunIntensity: sunVis,
-      sunset: sunsetNow
+      sunset: sunsetNow,
+      speed_mps: state.otterSpeed_mps,
+      paddleImpulse01,
+      motionDirXZ: tmpOtterDirXZ,
+      contact01
     });
 
     state.wakeRibbon.update({
@@ -755,12 +890,29 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       forwardXZ: tmpOtterDirXZ,
       surfaceY_m: surf.height_m,
       speed_mps: state.otterSpeed_mps,
-      paddleImpulse01: (state.otter as any).paddleImpulse01 ?? 0,
+      paddleImpulse01,
       calm01: calmness,
-      pulseFoamDamp
+      pulseFoamDamp,
+      contact01
     });
 
     const underwater = state.camera.position.y < (surf.height_m - 0.08);
+
+    state.otter.group.updateMatrixWorld(true);
+    state.waterline.update({
+      time_s: state.simTime_s,
+      waves: state.wavesCurrent,
+      currentXZ,
+      tideHeight_m,
+      rogue: rogueState,
+      pulse: state.seismicPulse,
+      cameraPos: state.camera.position,
+      sunIntensity: sunVis,
+      night,
+      underwater,
+      contactMeshes: state.otter.getContactMeshes(),
+      contactMeshesVersion: state.otter.getContactMeshesVersion()
+    });
 
     underwaterBlend = lerp(underwaterBlend, underwater ? 1 : 0, clamp(dt * 3.0, 0, 1));
 
@@ -771,6 +923,11 @@ export function startAnimationLoop(state: LoopState): LoopControls {
     }
 
     if (state.postFX.ssrPass) state.postFX.ssrPass.enabled = underwaterBlend < 0.02;
+    if (state.postFX.ssrPass) {
+      state.oceanMat.setSSRReflectionStrength(state.postFX.ssrPass.enabled ? 1.0 : 0.0);
+    } else {
+      state.oceanMat.setSSRReflectionStrength(0.0);
+    }
 
     if (state.postFX.underwaterPass) {
       const uwPass = state.postFX.underwaterPass as any;
@@ -814,12 +971,13 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       heightFogPass.uniforms.u_strength.value = clamp(1.0 - underwaterBlend, 0, 1);
     }
 
-    const paddleImpulse01 = (state.otter as any).paddleImpulse01 ?? 0;
-    const wakeStrength = clamp(
-      clamp(state.otterSpeed_mps / 0.25, 0, 1) * (0.15 + 0.35 * calmness) + paddleImpulse01 * (0.18 + 0.22 * calmness),
-      0,
-      1
-    );
+    const speed01 = clamp(state.otterSpeed_mps / 0.35, 0, 1);
+    const contactFoam = contact01 * (0.10 + 0.20 * paddleImpulse01);
+    const motionFoam =
+      (speed01 * (0.15 + 0.35 * calmness) + paddleImpulse01 * (0.18 + 0.22 * calmness)) * contact01;
+    const wakeStrength = clamp(contactFoam + motionFoam, 0, 1);
+    const wakeRadius = lerp(0.85, 1.95, speed01) * lerp(0.85, 1.1, contact01);
+    const wakeLength = (lerp(1.4, 6.4, speed01) + paddleImpulse01 * 1.6) * lerp(0.6, 1.0, contact01);
     state.foamField.update(state.renderer, {
       dt_s: dt,
       time_s: state.simTime_s,
@@ -833,6 +991,8 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       wakePosXZ: tmpOtterXZ,
       wakeDirXZ: tmpOtterDirXZ,
       wakeStrength,
+      wakeRadius,
+      wakeLength,
       capillaryStrength: state.params.capillaryStrength
     });
     state.oceanMat.bindFoamMap(state.foamField.texture);
@@ -868,6 +1028,8 @@ export function startAnimationLoop(state: LoopState): LoopControls {
         .lerp(state.sunLight.color, sunset * 0.18)
         .lerp(hazeStormCol, hazeStorm * 0.65)
         .lerp(hazeNightCol, night * 0.70);
+      const hazeFlash = clamp(lightningSkyFx * 0.55, 0, 1);
+      tmpHazeCol.lerp(tmpLightningCol, hazeFlash * 0.5);
 
       state.fogAbove.color.copy(tmpHazeCol);
       const densVis = lerp(0.00003, 0.00018, vis01);
@@ -883,7 +1045,8 @@ export function startAnimationLoop(state: LoopState): LoopControls {
         heightFogPass.uniforms.u_density.value = heightFogDensity;
       }
 
-      const expTarget = clamp(lerp(1.08, 1.18, sunset) * lerp(1.0, 0.90, night) + lightningFlashFx * 0.55, 0.55, 1.85);
+      const nightLift = lerp(1.0, 0.98, night);
+      const expTarget = clamp(lerp(1.08, 1.18, sunset) * nightLift + lightningSkyFx * 0.25, 0.55, 1.75);
       state.renderer.toneMappingExposure = lerp(state.renderer.toneMappingExposure, expTarget, clamp(dt * 2.5, 0, 1));
 
       state.stars.visible = true;
@@ -939,10 +1102,12 @@ export function startAnimationLoop(state: LoopState): LoopControls {
       dt_s: dt,
       time_s: state.simTime_s,
       cameraPos: state.camera.position,
+      cameraQuat: state.camera.quaternion,
       windDirFrom_deg: wx.windDirFrom_deg,
       intensity: wx.precipIntensity,
       mode: wx.precipType === 'Snow' ? 'Snow' : (wx.precipType === 'Rain' ? 'Rain' : 'None'),
-      visible: !underwater
+      visible: !underwater,
+      surfaceY: surf.height_m
     });
 
     state.rainbow.update({
@@ -993,10 +1158,13 @@ export function startAnimationLoop(state: LoopState): LoopControls {
     state.params.derived_cloudCover = Math.round(wx.cloudCover * 100) / 100;
     state.params.derived_visibility_km = Math.round(wx.visibility_km * 10) / 10;
     state.params.derived_windSpeed_mps = Math.round(wx.windSpeed_mps * 10) / 10;
+    state.params.derived_windBeaufort = Math.round(swellFromWind.beaufort * 10) / 10;
     state.params.derived_windDirFrom_deg = Math.round(wx.windDirFrom_deg);
     state.params.derived_precip = wx.precipType === 'None' ? 'None' : `${wx.precipType} (${Math.round(wx.precipIntensity * 100)}%)`;
     state.params.derived_Hs_m = Math.round(state.seaHs_m * 100) / 100;
     state.params.derived_Tp_s = Math.round(state.seaTp_s * 100) / 100;
+    state.params.derived_swellHeight_m = Math.round(swellFromWind.swellHeight_m * 100) / 100;
+    state.params.derived_swellWavelength_m = Math.round(swellFromWind.swellWavelength_m);
     state.params.derived_tideScale = Math.round(cel.tideScale * 1000) / 1000;
 
     const hh = Math.floor(state.timeOfDay_h);
@@ -1012,21 +1180,24 @@ export function startAnimationLoop(state: LoopState): LoopControls {
     state.params.derived_stormChanceEff_pct = wx.stormChanceEffective_pct;
     state.params.derived_hurricaneChanceEff_pct = wx.hurricaneChanceEffective_pct;
 
+    const sunsetGrade = sunset;
+    const warm = sunsetGrade * (1 - night * 0.55) * (1.0 - underwaterBlend);
+    const gradeScale = state.params.reduceFlashes ? 0.65 : 1.0;
+    const grainScale = state.params.reduceFlashes ? 0.4 : 1.0;
+    const contrastScale = state.params.reduceFlashes ? 0.96 : 1.0;
+    const baseGrain = state.params.quality === 'Max' ? 0.030 : (state.params.quality === 'High' ? 0.032 : 0.034);
+
     if (state.postFX.gradePass) {
-      const sunsetGrade = sunset;
-      const warm = sunsetGrade * (1 - night * 0.55) * (1.0 - underwaterBlend);
-      const gradeScale = state.params.reduceFlashes ? 0.65 : 1.0;
-      const grainScale = state.params.reduceFlashes ? 0.4 : 1.0;
-      const contrastScale = state.params.reduceFlashes ? 0.96 : 1.0;
-
-      (state.postFX.gradePass as any).uniforms.u_time.value = state.simTime_s;
+      (state.postFX.gradePass as any).uniforms.toneMappingExposure.value = state.renderer.toneMappingExposure;
       (state.postFX.gradePass as any).uniforms.u_warmth.value = 0.22 * warm * gradeScale;
-
-      const baseGrain = state.params.quality === 'Max' ? 0.030 : (state.params.quality === 'High' ? 0.032 : 0.034);
-      (state.postFX.gradePass as any).uniforms.u_grain.value = baseGrain * grainScale;
       (state.postFX.gradePass as any).uniforms.u_vignette.value = lerp(0.22, 0.12, underwaterBlend) * gradeScale;
       (state.postFX.gradePass as any).uniforms.u_saturation.value = lerp(1.04, 1.13, sunsetGrade) * lerp(1.0, 0.88, underwaterBlend) * contrastScale;
       (state.postFX.gradePass as any).uniforms.u_contrast.value = lerp(1.03, 1.08, sunsetGrade) * lerp(1.0, 0.92, underwaterBlend) * contrastScale;
+    }
+
+    if (state.postFX.grainPass) {
+      (state.postFX.grainPass as any).uniforms.u_time.value = state.simTime_s;
+      (state.postFX.grainPass as any).uniforms.u_strength.value = baseGrain * 0.07 * grainScale;
     }
 
     state.planarReflections.update({
@@ -1059,6 +1230,14 @@ export function startAnimationLoop(state: LoopState): LoopControls {
     } else {
       state.renderer.render(state.scene, state.camera);
     }
+
+    if (state.postFX.ssrPass && state.postFX.ssrPass.enabled) {
+      const composer = state.postFX.composer as any;
+      const ssrTarget = composer?.renderTarget2 ?? composer?.renderTarget1;
+      if (ssrTarget) {
+        (state.postFX.ssrPass as any).render(state.renderer, ssrTarget);
+      }
+    }
   }
 
   animate();
@@ -1079,6 +1258,46 @@ function copyWaveComponent(dst: WaveComponent, src: WaveComponent): void {
   dst.phase = src.phase;
   dst.Q = src.Q;
   dst.band = src.band;
+}
+
+// Blend swell vs chop energy with a wind-speed bias while keeping the silhouette stable.
+function blendWaveSpectra(
+  waves: WaveComponent[],
+  windSpeed_mps: number,
+  windSeaIntensity: number,
+  swellIntensity: number
+): void {
+  const wind01 = clamp(windSpeed_mps / 18, 0, 1);
+  const chopScaleBase = clamp(windSeaIntensity, 0, 2) * lerp(0.7, 1.25, wind01);
+  const swellScale = clamp(swellIntensity, 0, 2);
+
+  let chopEnergy = 0;
+  let swellEnergy = 0;
+  for (const w of waves) {
+    if (w.omega < 0) continue;
+    const e = w.A * w.A;
+    if (waveHasAnyTag(w, ['chop'])) chopEnergy += e;
+    else if (waveHasAnyTag(w, ['swell'])) swellEnergy += e;
+  }
+
+  const baseEnergy = chopEnergy + swellEnergy;
+  if (baseEnergy <= 1e-8 || chopEnergy <= 1e-8) return;
+
+  const targetEnergy = chopEnergy * chopScaleBase * chopScaleBase + swellEnergy * swellScale * swellScale;
+  const maxBoost = 1.18;
+  let chopScale = chopScaleBase;
+  if (targetEnergy > baseEnergy * maxBoost) {
+    chopScale *= Math.sqrt((baseEnergy * maxBoost) / targetEnergy);
+  }
+  if (Math.abs(chopScale - 1.0) < 1e-4) return;
+
+  const waveCount = Math.max(1, waves.length);
+  for (const w of waves) {
+    if (!waveHasAnyTag(w, ['chop'])) continue;
+    w.A *= chopScale;
+    const safeQ = 1 / Math.max(1e-6, w.k * w.A * waveCount);
+    if (w.Q > safeQ) w.Q = safeQ;
+  }
 }
 
 function waveCountForQuality(q: AppParams['quality']): number {

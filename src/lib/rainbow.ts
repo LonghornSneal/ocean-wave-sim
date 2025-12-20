@@ -90,5 +90,6 @@ function makeRainbowTexture(): THREE.Texture {
   tex.wrapT = THREE.ClampToEdgeWrapping;
   tex.minFilter = THREE.LinearFilter;
   tex.magFilter = THREE.LinearFilter;
+  tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
 }

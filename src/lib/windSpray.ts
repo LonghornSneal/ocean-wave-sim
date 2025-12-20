@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { clamp, lerp } from './math';
 import { mulberry32 } from './prng';
-import { DROPLET_TEX } from './waterParticleTextures';
+import { enablePointSpriteAttributes } from './pointSpriteMaterial';
+import { DROPLET_TEX, SOFT_SPRITE_ALPHA } from './waterParticleTextures';
 
 export interface WindSprayUpdate {
   dt_s: number;
@@ -24,35 +25,65 @@ export class WindSpray {
   private readonly pos: Float32Array;
   private readonly vel: Float32Array;
   private readonly life: Float32Array;
+  private readonly sizes: Float32Array;
+  private readonly opacities: Float32Array;
+  private readonly colors: Float32Array;
   private readonly geo: THREE.BufferGeometry;
+  private readonly posAttr: THREE.BufferAttribute;
+  private readonly sizeAttr: THREE.BufferAttribute;
+  private readonly opacityAttr: THREE.BufferAttribute;
+  private readonly colorAttr: THREE.BufferAttribute;
   private idx = 0;
 
   private gustTimer_s = 0;
   private gustActive_s = 0;
   private gustStrength = 0;
 
+  private readonly baseColor = new THREE.Color('#e6f4ff');
+  private readonly warmTint = new THREE.Color('#fff1de');
+  private readonly coolTint = new THREE.Color('#d6ecff');
+  private readonly tmpColor = new THREE.Color();
+
   constructor() {
     this.pos = new Float32Array(this.max * 3);
     this.vel = new Float32Array(this.max * 3);
     this.life = new Float32Array(this.max);
+    this.sizes = new Float32Array(this.max);
+    this.opacities = new Float32Array(this.max);
+    this.colors = new Float32Array(this.max * 3);
 
     this.geo = new THREE.BufferGeometry();
-    const posAttr = new THREE.BufferAttribute(this.pos, 3);
-    posAttr.setUsage(THREE.DynamicDrawUsage);
-    this.geo.setAttribute('position', posAttr);
+    this.posAttr = new THREE.BufferAttribute(this.pos, 3);
+    this.posAttr.setUsage(THREE.DynamicDrawUsage);
+    this.geo.setAttribute('position', this.posAttr);
+
+    this.sizeAttr = new THREE.BufferAttribute(this.sizes, 1);
+    this.sizeAttr.setUsage(THREE.DynamicDrawUsage);
+    this.geo.setAttribute('aSize', this.sizeAttr);
+
+    this.opacityAttr = new THREE.BufferAttribute(this.opacities, 1);
+    this.opacityAttr.setUsage(THREE.DynamicDrawUsage);
+    this.geo.setAttribute('aOpacity', this.opacityAttr);
+
+    this.colorAttr = new THREE.BufferAttribute(this.colors, 3);
+    this.colorAttr.setUsage(THREE.DynamicDrawUsage);
+    this.geo.setAttribute('color', this.colorAttr);
 
     const mat = new THREE.PointsMaterial({
-      color: new THREE.Color('#e6f4ff'),
+      color: new THREE.Color('#ffffff'),
       map: DROPLET_TEX,
+      alphaMap: SOFT_SPRITE_ALPHA,
       size: 0.12,
+      sizeAttenuation: true,
       transparent: true,
       opacity: 0.0,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
-      alphaTest: 0.02
+      vertexColors: true
     });
     this.points = new THREE.Points(this.geo, mat);
     this.points.frustumCulled = false;
+    enablePointSpriteAttributes(mat);
   }
 
   public dispose(): void {
@@ -98,8 +129,15 @@ export class WindSpray {
     }
 
     let any = false;
+    let opacityDirty = false;
     for (let i = 0; i < this.max; i++) {
-      if (this.life[i] <= 0) continue;
+      if (this.life[i] <= 0) {
+        if (this.opacities[i] !== 0) {
+          this.opacities[i] = 0;
+          opacityDirty = true;
+        }
+        continue;
+      }
       any = true;
       this.life[i] -= dt;
       const ix = i * 3;
@@ -112,10 +150,17 @@ export class WindSpray {
       this.pos[ix + 1] += this.vel[ix + 1] * dt;
       this.pos[ix + 2] += this.vel[ix + 2] * dt;
 
-      if (this.pos[ix + 1] < u.surfaceY - 0.1) this.life[i] = 0;
+      if (this.pos[ix + 1] < u.surfaceY - 0.1) {
+        this.life[i] = 0;
+      }
     }
 
-    (this.geo.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
+    this.posAttr.needsUpdate = true;
+    if (spawnN > 0) {
+      this.sizeAttr.needsUpdate = true;
+      this.colorAttr.needsUpdate = true;
+    }
+    if (spawnN > 0 || opacityDirty) this.opacityAttr.needsUpdate = true;
 
     const targetOpacity = any ? clamp(0.12 + 0.65 * (wind01 * 0.6 + gust * 0.7 + storm * 0.35 + rogue * 0.45), 0, 0.92) : 0;
     mat.opacity += (targetOpacity - mat.opacity) * clamp(dt * 3.0, 0, 1);
@@ -150,5 +195,23 @@ export class WindSpray {
     this.vel[ix + 0] = toX * lateral + sideX * (this.rng() * 2 - 1) * 0.6;
     this.vel[ix + 1] = up;
     this.vel[ix + 2] = toZ * lateral + sideZ * (this.rng() * 2 - 1) * 0.6;
+
+    this.applyVisual(i);
+  }
+
+  private applyVisual(i: number): void {
+    this.sizes[i] = lerp(0.7, 1.35, this.rng());
+    this.opacities[i] = lerp(0.6, 1.0, this.rng());
+
+    const temp = this.rng() * 2 - 1;
+    const tempMix = Math.abs(temp) * 0.12;
+    this.tmpColor.copy(this.baseColor);
+    if (temp >= 0) this.tmpColor.lerp(this.warmTint, tempMix);
+    else this.tmpColor.lerp(this.coolTint, tempMix);
+
+    const ix = i * 3;
+    this.colors[ix + 0] = this.tmpColor.r;
+    this.colors[ix + 1] = this.tmpColor.g;
+    this.colors[ix + 2] = this.tmpColor.b;
   }
 }

@@ -5,6 +5,7 @@ import type { WeatherSim } from '../lib/weather';
 import type { SeaOtter } from '../lib/otter';
 import type { OceanLife } from '../lib/life';
 import type { FoamField } from '../lib/foamField';
+import { swellStateFromWindSpeed } from '../lib/wavePhysics';
 
 export type ResetSimulationState = {
   simTime_s: number;
@@ -41,6 +42,8 @@ export function resetSimulationState(opts: {
     otterPrevXZ
   } = opts;
 
+  const forcedWind_mps = 42.0;
+
   // Kick off the sim in an in-progress thunderstorm so the first frame already
   // matches the "superstorm" scenario.
   weatherSim.reset({
@@ -54,7 +57,7 @@ export function resetSimulationState(opts: {
       storm01: 1.0,
       // Keep below the hurricane threshold by default (still wicked).
       hurricane01: 0.15,
-      windSpeed_mps: 42.0,
+      windSpeed_mps: forcedWind_mps,
       windDirFrom_deg: 42,
       gustiness01: 1.0,
       // Pretend the wind has been blowing for a long time so the sea is fully developed.
@@ -74,11 +77,13 @@ export function resetSimulationState(opts: {
   // Clear persistent foam between runs.
   foamField.reset(renderer, otterPrevXZ);
 
+  const swellInit = swellStateFromWindSpeed(forcedWind_mps);
+
   return {
     simTime_s: 0,
     // Start *immediately* in a dramatic sea-state (no long "wave growth" ramp).
-    seaHs_m: 13.5,
-    seaTp_s: 13.8,
+    seaHs_m: swellInit.swellHeight_m,
+    seaTp_s: swellInit.swellPeriod_s,
     windDirTo_rad: Math.PI,
     // A slower-moving "memory" direction used for the swell band (milestone #3).
     swellDirTo_rad: Math.PI,

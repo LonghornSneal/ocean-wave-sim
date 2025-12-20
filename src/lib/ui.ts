@@ -37,6 +37,8 @@ export function moonPhaseFraction(name: MoonPhaseName): number {
 
 export type QualityMode = 'Low' | 'Medium' | 'High' | 'Max';
 
+export type WindSpeedMode = 'Weather' | 'Manual';
+
 export type LocationPresetName =
   | 'Custom'
   | 'Equator (superstorm demo)'
@@ -147,6 +149,8 @@ export interface AppParams {
   stormsIn2to4hChance_pct: number;     // 0..100
   verticalWindShear_mps: number;       // 0..30-ish
   hurricaneChanceAdjust_pct: number;   // -20..+20 (percentage points)
+  windSpeedMode: WindSpeedMode;
+  windSpeedBeaufort: number;           // 0..12
 
   // Sea otter
   otterosity_pct: number;              // 0..100
@@ -158,11 +162,13 @@ export interface AppParams {
   /** Follow distance behind the otter (meters). */
   cameraDistance_m: number;
 
-  /** Camera elevation above the otter head (meters). */
+  /** Camera elevation above the water surface (meters). */
   cameraElevation_m: number;
 
   // Water
   clarity_pct: number;                 // 0..100
+  absorptionColor: string;
+  absorptionDistance_m: number;
 
   // Tide
   tideAmplitude_m: number;
@@ -175,6 +181,8 @@ export interface AppParams {
   seichePeriod_s: number;
   windSeaIntensity: number;            // 0..2
   swellIntensity: number;              // 0..2
+  microNormalStrength: number;         // 0..2.5
+  microNormalScale: number;            // 0.25..2.5
   capillaryStrength: number;           // 0..1
   capillaryAmplitude_m: number;        // 0..0.02
   capillarySlopeFalloff: number;       // 0.25..3
@@ -223,6 +231,9 @@ export interface AppParams {
   derived_precip: string;
   derived_Hs_m: number;
   derived_Tp_s: number;
+  derived_windBeaufort: number;
+  derived_swellHeight_m: number;
+  derived_swellWavelength_m: number;
   derived_tideScale: number;
   derived_stormETA: string;
   derived_stormChanceEff_pct: number;
@@ -259,6 +270,8 @@ export function defaultParams(): AppParams {
     stormsIn2to4hChance_pct: 100,
     verticalWindShear_mps: 1.5,
     hurricaneChanceAdjust_pct: 20,
+    windSpeedMode: 'Weather',
+    windSpeedBeaufort: 6,
 
     otterosity_pct: 55,
     exoticEncounters_pct: 8,
@@ -266,9 +279,11 @@ export function defaultParams(): AppParams {
 
     // Default “cinematic” follow camera framing.
     cameraDistance_m: 9.0,
-    cameraElevation_m: 1.05,
+    cameraElevation_m: 1.6,
 
     clarity_pct: 55,
+    absorptionColor: '#1a6c7a',
+    absorptionDistance_m: 28,
 
     tideAmplitude_m: 1.0,
     tidePeriod_h: 12.42,
@@ -279,6 +294,8 @@ export function defaultParams(): AppParams {
     seichePeriod_s: 180,
     windSeaIntensity: 1.0,
     swellIntensity: 1.0,
+    microNormalStrength: 1.0,
+    microNormalScale: 1.0,
     capillaryStrength,
     capillaryAmplitude_m,
     capillarySlopeFalloff: 1.2,
@@ -317,6 +334,9 @@ export function defaultParams(): AppParams {
     derived_precip: '—',
     derived_Hs_m: 0,
     derived_Tp_s: 0,
+    derived_windBeaufort: 0,
+    derived_swellHeight_m: 0,
+    derived_swellWavelength_m: 0,
     derived_tideScale: 1,
     derived_stormETA: '—',
     derived_stormChanceEff_pct: 0,
@@ -339,12 +359,16 @@ type PersistedParams = Pick<
   | 'stormsIn2to4hChance_pct'
   | 'verticalWindShear_mps'
   | 'hurricaneChanceAdjust_pct'
+  | 'windSpeedMode'
+  | 'windSpeedBeaufort'
   | 'otterosity_pct'
   | 'exoticEncounters_pct'
   | 'otterFurSilhouette'
   | 'cameraDistance_m'
   | 'cameraElevation_m'
   | 'clarity_pct'
+  | 'absorptionColor'
+  | 'absorptionDistance_m'
   | 'tideAmplitude_m'
   | 'tidePeriod_h'
   | 'tidePhase_deg'
@@ -353,6 +377,8 @@ type PersistedParams = Pick<
   | 'seichePeriod_s'
   | 'windSeaIntensity'
   | 'swellIntensity'
+  | 'microNormalStrength'
+  | 'microNormalScale'
   | 'capillaryStrength'
   | 'capillaryAmplitude_m'
   | 'capillarySlopeFalloff'
@@ -383,9 +409,14 @@ type PersistedPayload = {
 };
 
 const QUALITY_MODES: QualityMode[] = ['Low', 'Medium', 'High', 'Max'];
+const WIND_SPEED_MODES: WindSpeedMode[] = ['Weather', 'Manual'];
 
 function isQualityMode(v: unknown): v is QualityMode {
   return typeof v === 'string' && QUALITY_MODES.includes(v as QualityMode);
+}
+
+function isWindSpeedMode(v: unknown): v is WindSpeedMode {
+  return typeof v === 'string' && WIND_SPEED_MODES.includes(v as WindSpeedMode);
 }
 
 function isLocationPreset(v: unknown): v is LocationPresetName {
@@ -431,6 +462,10 @@ export function applyPersistedParams(params: AppParams): void {
   if (typeof data.hurricaneChanceAdjust_pct === 'number' && Number.isFinite(data.hurricaneChanceAdjust_pct)) {
     params.hurricaneChanceAdjust_pct = clamp(data.hurricaneChanceAdjust_pct, -20, 20);
   }
+  if (isWindSpeedMode(data.windSpeedMode)) params.windSpeedMode = data.windSpeedMode;
+  if (typeof data.windSpeedBeaufort === 'number' && Number.isFinite(data.windSpeedBeaufort)) {
+    params.windSpeedBeaufort = clamp(data.windSpeedBeaufort, 0, 12);
+  }
   if (typeof data.otterosity_pct === 'number' && Number.isFinite(data.otterosity_pct)) params.otterosity_pct = clamp(data.otterosity_pct, 0, 100);
   if (typeof data.exoticEncounters_pct === 'number' && Number.isFinite(data.exoticEncounters_pct)) {
     params.exoticEncounters_pct = clamp(data.exoticEncounters_pct, 0, 100);
@@ -439,6 +474,10 @@ export function applyPersistedParams(params: AppParams): void {
   if (typeof data.cameraDistance_m === 'number' && Number.isFinite(data.cameraDistance_m)) params.cameraDistance_m = clamp(data.cameraDistance_m, 9.0, 18.0);
   if (typeof data.cameraElevation_m === 'number' && Number.isFinite(data.cameraElevation_m)) params.cameraElevation_m = clamp(data.cameraElevation_m, 0.35, 3.0);
   if (typeof data.clarity_pct === 'number' && Number.isFinite(data.clarity_pct)) params.clarity_pct = clamp(data.clarity_pct, 0, 100);
+  if (typeof data.absorptionColor === 'string') params.absorptionColor = data.absorptionColor;
+  if (typeof data.absorptionDistance_m === 'number' && Number.isFinite(data.absorptionDistance_m)) {
+    params.absorptionDistance_m = clamp(data.absorptionDistance_m, 1, 300);
+  }
   if (typeof data.tideAmplitude_m === 'number' && Number.isFinite(data.tideAmplitude_m)) {
     params.tideAmplitude_m = clamp(data.tideAmplitude_m, 0, 3);
   }
@@ -460,6 +499,12 @@ export function applyPersistedParams(params: AppParams): void {
   }
   if (typeof data.swellIntensity === 'number' && Number.isFinite(data.swellIntensity)) {
     params.swellIntensity = clamp(data.swellIntensity, 0, 2);
+  }
+  if (typeof data.microNormalStrength === 'number' && Number.isFinite(data.microNormalStrength)) {
+    params.microNormalStrength = clamp(data.microNormalStrength, 0, 2.5);
+  }
+  if (typeof data.microNormalScale === 'number' && Number.isFinite(data.microNormalScale)) {
+    params.microNormalScale = clamp(data.microNormalScale, 0.25, 2.5);
   }
   if (typeof data.capillaryStrength === 'number' && Number.isFinite(data.capillaryStrength)) {
     params.capillaryStrength = clamp(data.capillaryStrength, 0, 1);
@@ -535,12 +580,16 @@ export function savePersistedParams(params: AppParams): void {
     stormsIn2to4hChance_pct: params.stormsIn2to4hChance_pct,
     verticalWindShear_mps: params.verticalWindShear_mps,
     hurricaneChanceAdjust_pct: params.hurricaneChanceAdjust_pct,
+    windSpeedMode: params.windSpeedMode,
+    windSpeedBeaufort: params.windSpeedBeaufort,
     otterosity_pct: params.otterosity_pct,
     exoticEncounters_pct: params.exoticEncounters_pct,
     otterFurSilhouette: params.otterFurSilhouette,
     cameraDistance_m: params.cameraDistance_m,
     cameraElevation_m: params.cameraElevation_m,
     clarity_pct: params.clarity_pct,
+    absorptionColor: params.absorptionColor,
+    absorptionDistance_m: params.absorptionDistance_m,
     tideAmplitude_m: params.tideAmplitude_m,
     tidePeriod_h: params.tidePeriod_h,
     tidePhase_deg: params.tidePhase_deg,
@@ -549,6 +598,8 @@ export function savePersistedParams(params: AppParams): void {
     seichePeriod_s: params.seichePeriod_s,
     windSeaIntensity: params.windSeaIntensity,
     swellIntensity: params.swellIntensity,
+    microNormalStrength: params.microNormalStrength,
+    microNormalScale: params.microNormalScale,
     capillaryStrength: params.capillaryStrength,
     capillaryAmplitude_m: params.capillaryAmplitude_m,
     capillarySlopeFalloff: params.capillarySlopeFalloff,
@@ -715,22 +766,45 @@ export function createGUI(params: AppParams, h: GUIHandlers): GUI {
   fWx.add(params, 'verticalWindShear_mps', 0, 30, 0.1).name('vertical wind shear (m/s)').onChange(h.onAnyChange);
   fWx.add(params, 'hurricaneChanceAdjust_pct', -20, 20, 1).name('hurricane chance adjust (±%)').onChange(h.onAnyChange);
 
+  const fWind = fWx.addFolder('Wind');
+  const cWindMode = fWind.add(params, 'windSpeedMode', WIND_SPEED_MODES).name('speed source');
+  const cWindBft = fWind.add(params, 'windSpeedBeaufort', 0, 12, 0.1).name('speed (Beaufort)');
+  cWindBft.listen();
+
+  const updateWindMode = () => {
+    const manual = params.windSpeedMode === 'Manual';
+    setEnabled(cWindBft, manual);
+  };
+  updateWindMode();
+
+  cWindMode.onChange(() => {
+    updateWindMode();
+    h.onAnyChange();
+  });
+  cWindBft.onChange(h.onAnyChange);
+
   const fOtter = gui.addFolder('Sea Otter');
   fOtter.add(params, 'otterosity_pct', 0, 100, 1).name('Otterosity').onChange(h.onAnyChange);
   fOtter.add(params, 'exoticEncounters_pct', 0, 100, 1).name('exotic encounters (%)').onChange(h.onAnyChange);
   fOtter.add(params, 'otterFurSilhouette').name('fur silhouette (Hi/Max)').onChange(h.onAnyChange);
 
   const fCam = gui.addFolder('Camera');
-  fCam.add(params, 'cameraDistance_m', 9.0, 18.0, 0.01).name('distance (m)').onChange(() => {
+  const cCamDist = fCam.add(params, 'cameraDistance_m', 9.0, 18.0, 0.01).name('distance (m)').onChange(() => {
     h.onCameraChange?.();
   });
-  fCam.add(params, 'cameraElevation_m', 0.35, 3.0, 0.01).name('elevation (m)').onChange(() => {
+  const cCamElev = fCam.add(params, 'cameraElevation_m', 0.35, 3.0, 0.01).name('elevation (m)').onChange(() => {
     h.onCameraChange?.();
   });
+  setTooltip(cCamDist, 'Follow distance behind the otter (meters).');
+  setTooltip(cCamElev, 'Camera height above the water surface (meters).');
 
   const fWater = gui.addFolder('Water');
   const cClarity = fWater.add(params, 'clarity_pct', 0, 100, 1).name('clarity (%)');
   cClarity.onChange(h.onAnyChange);
+  const cAbsorbColor = fWater.addColor(params, 'absorptionColor').name('absorption color');
+  const cAbsorbDist = fWater.add(params, 'absorptionDistance_m', 1, 300, 0.5).name('absorption dist (m)');
+  cAbsorbColor.onChange(h.onAnyChange);
+  cAbsorbDist.onChange(h.onAnyChange);
 
   const fTide = fWater.addFolder('Tide');
   const cTideAmp = fTide.add(params, 'tideAmplitude_m', 0, 3, 0.01).name('amplitude (m)');
@@ -808,6 +882,13 @@ export function createGUI(params: AppParams, h: GUIHandlers): GUI {
   const cSwell = fWater.add(params, 'swellIntensity', 0, 2, 0.01).name('swell intensity');
   cSwell.onChange(h.onAnyChange);
 
+  const fMicro = fWater.addFolder('Micro Ripples');
+  const cMicroStrength = fMicro.add(params, 'microNormalStrength', 0, 2.5, 0.01).name('strength');
+  const cMicroScale = fMicro.add(params, 'microNormalScale', 0.25, 2.5, 0.01).name('scale');
+
+  cMicroStrength.onChange(h.onAnyChange);
+  cMicroScale.onChange(h.onAnyChange);
+
   const fCap = fWater.addFolder('Capillary');
   const cCapStrength = fCap.add(params, 'capillaryStrength', 0, 1, 0.01).name('speckle strength');
   const cCapAmp = fCap.add(params, 'capillaryAmplitude_m', 0, 0.02, 0.0005).name('amplitude (m)');
@@ -842,6 +923,10 @@ export function createGUI(params: AppParams, h: GUIHandlers): GUI {
   setTooltip(cRoguePhase, 'Phase alignment (%). Range: 0-100 (safe <=70).');
   setTooltip(cWindSea, 'Boosts foam/roughness from wind-sea energy. Range: 0-2 (safe 0-1.5).');
   setTooltip(cSwell, 'Scales long-wave displacement (swell). Range: 0-2 (safe 0.6-1.4).');
+  setTooltip(cWindMode, 'Use the weather model or manual Beaufort wind control.');
+  setTooltip(cWindBft, 'Manual Beaufort wind speed (0-12). Drives wave spectrum and spray.');
+  setTooltip(cMicroStrength, 'Scales micro normal intensity. Range: 0-2.5 (safe 0.5-1.5).');
+  setTooltip(cMicroScale, 'Scales micro ripple frequency. >1 = finer, <1 = broader. Range: 0.25-2.5.');
   setTooltip(cCapStrength, 'Boosts glancing capillary sparkle + foam speckle. Range: 0-1 (safe <=0.5).');
   setTooltip(cCapAmp, 'Capillary ripple height scale (m). Range: 0-0.02 (safe <=0.01).');
   setTooltip(cCapSlope, 'Capillary amplitude falloff for shorter ripples. Range: 0.25-3 (safe 0.6-2).');
@@ -873,6 +958,7 @@ export function createGUI(params: AppParams, h: GUIHandlers): GUI {
   fRead.add(params, 'derived_cloudCover').name('cloud').listen();
   fRead.add(params, 'derived_visibility_km').name('vis km').listen();
   fRead.add(params, 'derived_windSpeed_mps').name('wind m/s').listen();
+  fRead.add(params, 'derived_windBeaufort').name('wind Bft').listen();
   fRead.add(params, 'derived_windDirFrom_deg').name('wind from°').listen();
   fRead.add(params, 'derived_precip').name('precip').listen();
   fRead.add(params, 'derived_stormETA').name('storm ETA').listen();
@@ -880,6 +966,8 @@ export function createGUI(params: AppParams, h: GUIHandlers): GUI {
   fRead.add(params, 'derived_hurricaneChanceEff_pct').name('hurricane % (eff)').listen();
   fRead.add(params, 'derived_Hs_m').name('Hs (m)').listen();
   fRead.add(params, 'derived_Tp_s').name('Tp (s)').listen();
+  fRead.add(params, 'derived_swellHeight_m').name('swell Hs (m)').listen();
+  fRead.add(params, 'derived_swellWavelength_m').name('swell L (m)').listen();
   fRead.add(params, 'derived_tideScale').name('tide scale').listen();
 
   fLoc.open();

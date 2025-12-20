@@ -33,6 +33,14 @@ export interface OceanUniforms {
   u_waveB: { value: THREE.Vector4[] };
   /** 0..2 swell displacement multiplier (applied in shader for swell-tagged waves). */
   u_swellIntensity: { value: number };
+  /** Distance-based wave LOD fade (meters). */
+  u_lodFadeNear: { value: number };
+  u_lodFadeFar: { value: number };
+  /** Wave-number thresholds for LOD filtering (1/m). */
+  u_lodKLow: { value: number };
+  u_lodKHigh: { value: number };
+  /** Optional low-frequency boost to keep far silhouette. */
+  u_lodLowBoost: { value: number };
 
   u_pulseA: { value: THREE.Vector4 };
   u_pulseB: { value: THREE.Vector4 };
@@ -45,6 +53,14 @@ export interface OceanUniforms {
 
   /** 0..1 (0=turbid/greenish, 1=clear/blue). */
   u_waterClarity: { value: number };
+  /** Surface roughness synced from the material (for custom glint/reflection). */
+  u_surfaceRoughness: { value: number };
+  /** Mean water depth in meters (used for absorption falloff). */
+  u_waterDepth: { value: number };
+  /** Absorption tint (Beer–Lambert). */
+  u_absorptionColor: { value: THREE.Color };
+  /** Distance in meters to reach absorption tint. */
+  u_absorptionDistance: { value: number };
 
   /** Sun direction in world space (points *toward* the sun). */
   u_sunDir: { value: THREE.Vector3 };
@@ -52,6 +68,12 @@ export interface OceanUniforms {
   u_sunColor: { value: THREE.Color };
   /** 0..1 visibility/intensity factor for sun glint. */
   u_sunIntensity: { value: number };
+  /** Lightning direction in world space (points toward the flash). */
+  u_lightningDir: { value: THREE.Vector3 };
+  /** Lightning color (blue-white). */
+  u_lightningColor: { value: THREE.Color };
+  /** 0..1 flash strength for specular spike. */
+  u_lightningIntensity: { value: number };
 
   /** Planar reflection map (mirror camera RT). */
   u_reflectionMap: { value: THREE.Texture };
@@ -66,6 +88,13 @@ export interface OceanUniforms {
   u_reflectionBlur: { value: number };
   /** Edge fade in UV space (prevents hard pops when projection goes out of bounds). */
   u_reflectionEdgeFade: { value: number };
+
+  /** Screen-space reflection (SSR) texture. */
+  u_ssrMap: { value: THREE.Texture };
+  /** SSR texture texel size (1/px). */
+  u_ssrTexel: { value: THREE.Vector2 };
+  /** 0..1 SSR blend strength. */
+  u_ssrStrength: { value: number };
 
   /** Persistent foam field (ping-pong sim). */
   u_foamMap: { value: THREE.Texture };
@@ -108,6 +137,17 @@ const FALLBACK_REFLECTION_TEX: THREE.DataTexture = (() => {
   return t;
 })();
 
+// 1x1 transparent fallback for SSR hits.
+const FALLBACK_SSR_TEX: THREE.DataTexture = (() => {
+  const t = new THREE.DataTexture(new Uint8Array([0, 0, 0, 0]), 1, 1);
+  t.needsUpdate = true;
+  t.flipY = false;
+  t.colorSpace = THREE.LinearSRGBColorSpace;
+  t.minFilter = THREE.LinearFilter;
+  t.magFilter = THREE.LinearFilter;
+  return t;
+})();
+
 // 1x1 black fallback for foam.
 const FALLBACK_FOAM_TEX: THREE.DataTexture = (() => {
   const t = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1);
@@ -136,6 +176,8 @@ const FALLBACK_NORMAL_TEX: THREE.DataTexture = (() => {
 
 // Generate micro normal textures once (module scope) to avoid per-instance allocations.
 const MICRO_NORMALS = makeMicroNormalSet();
+const MICRO_SCALE_BASE1 = 0.28;
+const MICRO_SCALE_BASE2 = 0.85;
 
 export class OceanMaterial {
   public readonly material: THREE.MeshPhysicalMaterial;
@@ -161,6 +203,11 @@ export class OceanMaterial {
       u_waveA: { value: waveA },
       u_waveB: { value: waveB },
       u_swellIntensity: { value: 1.0 },
+      u_lodFadeNear: { value: 500.0 },
+      u_lodFadeFar: { value: 2000.0 },
+      u_lodKLow: { value: (Math.PI * 2) / 120.0 },
+      u_lodKHigh: { value: (Math.PI * 2) / 48.0 },
+      u_lodLowBoost: { value: 1.05 },
 
       u_pulseA: { value: new THREE.Vector4(1, 0, 0, 1) },
       u_pulseB: { value: new THREE.Vector4(0, 0, 0, 0) },
@@ -172,10 +219,17 @@ export class OceanMaterial {
       u_foamSlopeEnd: { value: params.foamSlopeEnd },
 
       u_waterClarity: { value: 0.7 },
+      u_surfaceRoughness: { value: 0.045 },
+      u_waterDepth: { value: 500.0 },
+      u_absorptionColor: { value: new THREE.Color('#1a6c7a') },
+      u_absorptionDistance: { value: 28.0 },
 
       u_sunDir: { value: new THREE.Vector3(0.0, 1.0, 0.0) },
       u_sunColor: { value: new THREE.Color('#ffffff') },
       u_sunIntensity: { value: 1.0 },
+      u_lightningDir: { value: new THREE.Vector3(0.0, 1.0, 0.0) },
+      u_lightningColor: { value: new THREE.Color('#dbe9ff') },
+      u_lightningIntensity: { value: 0.0 },
 
       u_reflectionMap: { value: FALLBACK_REFLECTION_TEX },
       u_reflectionMatrix: { value: new THREE.Matrix4() },
@@ -184,6 +238,10 @@ export class OceanMaterial {
       u_reflectionTexel: { value: new THREE.Vector2(1, 1) },
       u_reflectionBlur: { value: 0.0 },
       u_reflectionEdgeFade: { value: 0.03 },
+
+      u_ssrMap: { value: FALLBACK_SSR_TEX },
+      u_ssrTexel: { value: new THREE.Vector2(1, 1) },
+      u_ssrStrength: { value: 0.0 },
 
       u_foamMap: { value: FALLBACK_FOAM_TEX },
       u_foamCenter: { value: new THREE.Vector2(0, 0) },
@@ -196,8 +254,8 @@ export class OceanMaterial {
       u_microNormal2: { value: MICRO_NORMALS.capillary },
 
       // World-space sampling scales (1/m). Values are tuned for meter-scale world units.
-      u_microScale1: { value: 0.28 },
-      u_microScale2: { value: 0.85 },
+      u_microScale1: { value: MICRO_SCALE_BASE1 },
+      u_microScale2: { value: MICRO_SCALE_BASE2 },
 
       // Final mix strength (also faded by distance in shader).
       u_microStrength: { value: 0.08 },
@@ -221,9 +279,11 @@ export class OceanMaterial {
       reflectivity: 0.78
     });
     this.baseRoughness = this.material.roughness;
+    this.uniforms.u_surfaceRoughness.value = this.material.roughness;
 
     // Needed for underwater view.
     this.material.side = THREE.DoubleSide;
+    this.material.extensions.derivatives = true;
 
     // Assign initial wave data
     this.setWaves(params.waves);
@@ -233,7 +293,7 @@ export class OceanMaterial {
       this.shader = shader;
     };
 
-    this.material.customProgramCacheKey = () => 'OceanMaterial_v8_band_meta';
+    this.material.customProgramCacheKey = () => 'OceanMaterial_v12_lightning';
 
     this.setWaves(params.waves);
   }
@@ -280,16 +340,25 @@ export class OceanMaterial {
     currentXZ: THREE.Vector2;
     tideHeight_m: number;
     waterClarity: number;
+    waterDepth_m: number;
+    absorptionColor: THREE.ColorRepresentation;
+    absorptionDistance_m: number;
     foamIntensity: number;
     foamSlopeStart: number;
     foamSlopeEnd: number;
     rogueIntensity?: number;
     windSeaIntensity: number;
     swellIntensity: number;
+    lodFadeNear_m: number;
+    lodFadeFar_m: number;
+    lodWavelengthLong_m: number;
+    lodWavelengthShort_m: number;
+    lodLowBoost?: number;
     pulse?: SeismicPulseState | null;
 
     // Milestone #3: micro normals
     windXZ: THREE.Vector2;
+    microScale: number;
     microStrength: number;
     microFadeNear_m: number;
     microFadeFar_m: number;
@@ -298,6 +367,9 @@ export class OceanMaterial {
     sunDir: THREE.Vector3;
     sunColor: THREE.Color;
     sunIntensity: number;
+    lightningDir: THREE.Vector3;
+    lightningColor: THREE.Color;
+    lightningIntensity: number;
   }): void {
     this.uniforms.u_time.value = opts.time_s;
     this.uniforms.u_origin.value.copy(opts.originXZ);
@@ -318,6 +390,9 @@ export class OceanMaterial {
 
     const rogue = clamp(opts.rogueIntensity ?? 0, 0, 1);
     this.uniforms.u_waterClarity.value = clamp(opts.waterClarity * (1.0 - 0.12 * rogue), 0, 1);
+    this.uniforms.u_waterDepth.value = Math.max(1.0, opts.waterDepth_m);
+    this.uniforms.u_absorptionColor.value.set(opts.absorptionColor);
+    this.uniforms.u_absorptionDistance.value = Math.max(0.5, opts.absorptionDistance_m);
 
     const windSeaRatio = clamp(this.windSeaEnergyRatio, 0, 1);
     const windSeaIntensity = clamp(opts.windSeaIntensity, 0, 2);
@@ -336,10 +411,30 @@ export class OceanMaterial {
     this.uniforms.u_foamSlopeStart.value = clamp(opts.foamSlopeStart - slopeShift - rogueSlopeShift, 0, 2);
     this.uniforms.u_foamSlopeEnd.value = clamp(opts.foamSlopeEnd - slopeShift * 1.15 - rogueSlopeShift * 0.9, 0, 2);
     this.material.roughness = clamp(this.baseRoughness + 0.08 * windSeaBias + 0.06 * rogue, 0.02, 0.32);
+    this.uniforms.u_surfaceRoughness.value = this.material.roughness;
     this.uniforms.u_swellIntensity.value = clamp(opts.swellIntensity, 0, 2);
+
+    const lodFadeNear = Math.max(0.0, opts.lodFadeNear_m);
+    const lodFadeFar = Math.max(lodFadeNear + 1.0, opts.lodFadeFar_m);
+    this.uniforms.u_lodFadeNear.value = lodFadeNear;
+    this.uniforms.u_lodFadeFar.value = lodFadeFar;
+
+    const waveLong = Math.max(1.0, opts.lodWavelengthLong_m);
+    const waveShort = Math.max(1.0, opts.lodWavelengthShort_m);
+    const waveLo = Math.max(waveLong, waveShort);
+    const waveHi = Math.min(waveLong, waveShort);
+    const kLow = (Math.PI * 2.0) / waveLo;
+    let kHigh = (Math.PI * 2.0) / waveHi;
+    if (kHigh <= kLow + 1e-6) kHigh = kLow + 1e-6;
+    this.uniforms.u_lodKLow.value = kLow;
+    this.uniforms.u_lodKHigh.value = kHigh;
+    this.uniforms.u_lodLowBoost.value = clamp(opts.lodLowBoost ?? 1.0, 0.8, 1.35);
 
     // Micro normals: set wind and tuned strength / fade distances.
     this.uniforms.u_wind.value.copy(opts.windXZ);
+    const microScale = clamp(opts.microScale, 0.25, 2.5);
+    this.uniforms.u_microScale1.value = MICRO_SCALE_BASE1 * microScale;
+    this.uniforms.u_microScale2.value = MICRO_SCALE_BASE2 * microScale;
     this.uniforms.u_microStrength.value = clamp(opts.microStrength * (1.0 + 0.35 * rogue), 0.0, 0.35);
     this.uniforms.u_microFadeNear.value = Math.max(1.0, opts.microFadeNear_m);
     this.uniforms.u_microFadeFar.value = Math.max(this.uniforms.u_microFadeNear.value + 1.0, opts.microFadeFar_m);
@@ -350,6 +445,9 @@ export class OceanMaterial {
     this.uniforms.u_sunDir.value.copy(opts.sunDir).normalize();
     this.uniforms.u_sunColor.value.copy(opts.sunColor);
     this.uniforms.u_sunIntensity.value = clamp(opts.sunIntensity, 0, 1.5);
+    this.uniforms.u_lightningDir.value.copy(opts.lightningDir).normalize();
+    this.uniforms.u_lightningColor.value.copy(opts.lightningColor);
+    this.uniforms.u_lightningIntensity.value = clamp(opts.lightningIntensity, 0, 1.5);
 
     // dt_s reserved for future temporal smoothing.
     void dt_s;
@@ -393,6 +491,31 @@ export class OceanMaterial {
     }
     if (opts.edgeFade !== undefined) {
       this.uniforms.u_reflectionEdgeFade.value = clamp(opts.edgeFade, 0.0, 0.25);
+    }
+  }
+
+  /** Bind screen-space reflection texture (SSR). */
+  public bindSSRReflection(texture: THREE.Texture | null): void {
+    this.uniforms.u_ssrMap.value = texture ?? FALLBACK_SSR_TEX;
+  }
+
+  /** Set SSR blend strength (0..1). */
+  public setSSRReflectionStrength(strength: number): void {
+    this.uniforms.u_ssrStrength.value = clamp(strength, 0, 1);
+  }
+
+  /** Set SSR sampling controls (texel + blend strength). */
+  public setSSRReflectionSampling(opts: { texel?: number | THREE.Vector2; strength?: number }): void {
+    if (opts.texel !== undefined) {
+      if (typeof opts.texel === 'number') {
+        const t = Math.max(1e-6, opts.texel);
+        this.uniforms.u_ssrTexel.value.set(t, t);
+      } else {
+        this.uniforms.u_ssrTexel.value.copy(opts.texel);
+      }
+    }
+    if (opts.strength !== undefined) {
+      this.setSSRReflectionStrength(opts.strength);
     }
   }
 

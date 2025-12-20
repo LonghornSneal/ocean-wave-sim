@@ -10,6 +10,7 @@ export interface WakeRibbonUpdate {
   speed_mps: number;
   paddleImpulse01: number;
   calm01: number;
+  contact01?: number;
   /** 0..1; lower values reduce foam when pulse is active. */
   pulseFoamDamp?: number;
 }
@@ -80,6 +81,8 @@ export class WakeRibbon {
           // Slightly bluish-white foam cue.
           vec3 col = vec3(0.88, 0.92, 0.96);
           gl_FragColor = vec4(col, a);
+          #include <tonemapping_fragment>
+          #include <colorspace_fragment>
         }
       `
     });
@@ -101,10 +104,11 @@ export class WakeRibbon {
 
     const speed01 = clamp(u.speed_mps / 0.30, 0, 1);
     const pulse = clamp(u.paddleImpulse01, 0, 1);
+    const contact01 = clamp(u.contact01 ?? 1.0, 0.0, 1.0);
 
     // Wake is most legible in calm conditions.
     const foamDamp = clamp(u.pulseFoamDamp ?? 1.0, 0.0, 1.0);
-    const target = clamp((0.35 + 0.75 * speed01 + 0.55 * pulse) * (0.25 + 0.75 * u.calm01), 0, 1) * foamDamp;
+    const target = clamp((0.35 + 0.75 * speed01 + 0.55 * pulse) * (0.25 + 0.75 * u.calm01), 0, 1) * foamDamp * contact01;
     this.intensity = lerp(this.intensity, target, clamp(u.dt_s * 6.0, 0, 1));
     mat.uniforms.u_intensity.value = this.intensity;
 

@@ -1,10 +1,7 @@
-import * as THREE from 'three';
-
 export const GradeShader = {
   uniforms: {
     tDiffuse: { value: null as any },
-    u_time: { value: 0.0 },
-    u_grain: { value: 0.03 },
+    toneMappingExposure: { value: 1.0 },
     u_vignette: { value: 0.22 },
     u_saturation: { value: 1.08 },
     u_contrast: { value: 1.06 },
@@ -19,8 +16,6 @@ export const GradeShader = {
   `,
   fragmentShader: /* glsl */ `
     uniform sampler2D tDiffuse;
-    uniform float u_time;
-    uniform float u_grain;
     uniform float u_vignette;
     uniform float u_saturation;
     uniform float u_contrast;
@@ -28,15 +23,13 @@ export const GradeShader = {
 
     varying vec2 vUv;
 
-    float hash(vec2 p) {
-      // Simple, fast hash for grain.
-      p = fract(p * vec2(123.34, 456.21));
-      p += dot(p, p + 45.32);
-      return fract(p.x * p.y);
-    }
+    #include <tonemapping_pars_fragment>
 
     void main() {
       vec4 col = texture2D(tDiffuse, vUv);
+
+      // Tone map HDR -> display-referred.
+      col.rgb = ACESFilmicToneMapping(col.rgb);
 
       // Contrast
       col.rgb = (col.rgb - 0.5) * u_contrast + 0.5;
@@ -53,10 +46,7 @@ export const GradeShader = {
       float vig = smoothstep(0.82, 0.35, d);
       col.rgb *= mix(1.0 - u_vignette, 1.0, vig);
 
-      // Film grain (very subtle)
-      float n = hash(vUv * vec2(1920.0, 1080.0) + u_time * 1.7);
-      col.rgb += (n - 0.5) * (u_grain * 0.08);
-
+      col.rgb = clamp(col.rgb, 0.0, 1.0);
       gl_FragColor = col;
     }
   `

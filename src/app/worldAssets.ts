@@ -10,6 +10,7 @@ import { SplashSystem } from '../lib/splashes';
 import { WindSpray } from '../lib/windSpray';
 import { OtterRipples } from '../lib/ripples';
 import { WakeRibbon } from '../lib/wakeRibbon';
+import { OtterWaterline } from '../lib/otterWaterline';
 
 export type WorldAssets = {
   life: OceanLife;
@@ -24,6 +25,7 @@ export type WorldAssets = {
   windSpray: WindSpray;
   ripples: OtterRipples;
   wakeRibbon: WakeRibbon;
+  waterline: OtterWaterline;
 };
 
 export function createWorldAssets(scene: THREE.Scene, params: AppParams): WorldAssets {
@@ -109,6 +111,10 @@ export function createWorldAssets(scene: THREE.Scene, params: AppParams): WorldA
   const wakeRibbon = new WakeRibbon();
   scene.add(wakeRibbon.mesh);
 
+  // Waterline contact shadow (otter vs water intersection)
+  const waterline = new OtterWaterline();
+  scene.add(waterline.mesh);
+
   // Direction from the camera toward the most recent flash. Used to localize
   // lightning illumination in the cloud shader (so it doesn't brighten the whole dome).
   const lightningDir = new THREE.Vector3(0, 1, 0);
@@ -125,6 +131,7 @@ export function createWorldAssets(scene: THREE.Scene, params: AppParams): WorldA
     splashes,
     windSpray,
     ripples,
-    wakeRibbon
+    wakeRibbon,
+    waterline
   };
 }

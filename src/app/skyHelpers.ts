@@ -110,6 +110,8 @@ export function makeStars(count: number): THREE.Points {
         if (alpha < 0.003) discard;
         vec3 color = vColor * lum * (0.6 + 0.6 * core);
         gl_FragColor = vec4(color, alpha);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
       }
     `
   }) as StarMaterial;
@@ -187,6 +189,7 @@ function makeRadialTexture(color: string): THREE.Texture {
   const tex = new THREE.CanvasTexture(canvas);
   tex.minFilter = THREE.LinearFilter;
   tex.magFilter = THREE.LinearFilter;
+  tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
 }
 
@@ -252,5 +255,6 @@ function makeMoonTexture(phaseFrac: number): THREE.Texture {
   const tex = new THREE.CanvasTexture(canvas);
   tex.minFilter = THREE.LinearFilter;
   tex.magFilter = THREE.LinearFilter;
+  tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
 }

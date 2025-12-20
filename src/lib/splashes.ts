@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { clamp } from './math';
 import { mulberry32 } from './prng';
-import { SPLASH_TEX } from './waterParticleTextures';
+import { enablePointSpriteAttributes } from './pointSpriteMaterial';
+import { SOFT_SPRITE_ALPHA, SPLASH_TEX } from './waterParticleTextures';
 
 export interface SplashUpdate {
   dt_s: number;
@@ -22,30 +23,60 @@ export class SplashSystem {
   private pos: Float32Array;
   private vel: Float32Array;
   private life: Float32Array;
+  private sizes: Float32Array;
+  private opacities: Float32Array;
+  private colors: Float32Array;
   private geo: THREE.BufferGeometry;
+  private posAttr: THREE.BufferAttribute;
+  private sizeAttr: THREE.BufferAttribute;
+  private opacityAttr: THREE.BufferAttribute;
+  private colorAttr: THREE.BufferAttribute;
   private idx = 0;
+
+  private readonly baseColor = new THREE.Color('#ffffff');
+  private readonly warmTint = new THREE.Color('#fff1de');
+  private readonly coolTint = new THREE.Color('#d6ecff');
+  private readonly tmpColor = new THREE.Color();
 
   constructor() {
     this.pos = new Float32Array(this.max * 3);
     this.vel = new Float32Array(this.max * 3);
     this.life = new Float32Array(this.max);
+    this.sizes = new Float32Array(this.max);
+    this.opacities = new Float32Array(this.max);
+    this.colors = new Float32Array(this.max * 3);
 
     this.geo = new THREE.BufferGeometry();
-    const posAttr = new THREE.BufferAttribute(this.pos, 3);
-    posAttr.setUsage(THREE.DynamicDrawUsage);
-    this.geo.setAttribute('position', posAttr);
+    this.posAttr = new THREE.BufferAttribute(this.pos, 3);
+    this.posAttr.setUsage(THREE.DynamicDrawUsage);
+    this.geo.setAttribute('position', this.posAttr);
+
+    this.sizeAttr = new THREE.BufferAttribute(this.sizes, 1);
+    this.sizeAttr.setUsage(THREE.DynamicDrawUsage);
+    this.geo.setAttribute('aSize', this.sizeAttr);
+
+    this.opacityAttr = new THREE.BufferAttribute(this.opacities, 1);
+    this.opacityAttr.setUsage(THREE.DynamicDrawUsage);
+    this.geo.setAttribute('aOpacity', this.opacityAttr);
+
+    this.colorAttr = new THREE.BufferAttribute(this.colors, 3);
+    this.colorAttr.setUsage(THREE.DynamicDrawUsage);
+    this.geo.setAttribute('color', this.colorAttr);
     const mat = new THREE.PointsMaterial({
       color: new THREE.Color('#ffffff'),
       map: SPLASH_TEX,
+      alphaMap: SOFT_SPRITE_ALPHA,
       size: 0.12,
+      sizeAttenuation: true,
       transparent: true,
       opacity: 0.0,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
-      alphaTest: 0.02
+      vertexColors: true
     });
     this.points = new THREE.Points(this.geo, mat);
     this.points.frustumCulled = false;
+    enablePointSpriteAttributes(mat);
   }
 
   public dispose(): void {
@@ -72,8 +103,15 @@ export class SplashSystem {
 
     // Update all particles
     let any = false;
+    let opacityDirty = false;
     for (let i = 0; i < this.max; i++) {
-      if (this.life[i] <= 0) continue;
+      if (this.life[i] <= 0) {
+        if (this.opacities[i] !== 0) {
+          this.opacities[i] = 0;
+          opacityDirty = true;
+        }
+        continue;
+      }
       any = true;
       this.life[i] -= dt;
       const ix = i * 3;
@@ -86,7 +124,12 @@ export class SplashSystem {
       // Kill if below surface
       if (this.pos[ix + 1] < u.surfaceY - 0.1) this.life[i] = 0;
     }
-    (this.geo.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
+    this.posAttr.needsUpdate = true;
+    if (spawnN > 0) {
+      this.sizeAttr.needsUpdate = true;
+      this.colorAttr.needsUpdate = true;
+    }
+    if (spawnN > 0 || opacityDirty) this.opacityAttr.needsUpdate = true;
 
     const targetOpacity = any ? clamp(0.15 + 0.55 * u.intensity, 0, 0.85) : 0;
     mat.opacity += (targetOpacity - mat.opacity) * clamp(dt * 3.0, 0, 1);
@@ -109,6 +152,24 @@ export class SplashSystem {
     this.vel[ix + 0] = toX * lateral + (this.rng() * 2 - 1) * 0.35;
     this.vel[ix + 1] = up;
     this.vel[ix + 2] = toZ * lateral + (this.rng() * 2 - 1) * 0.35;
+
+    this.applyVisual(i);
+  }
+
+  private applyVisual(i: number): void {
+    this.sizes[i] = lerp(0.7, 1.4, this.rng());
+    this.opacities[i] = lerp(0.65, 1.0, this.rng());
+
+    const temp = this.rng() * 2 - 1;
+    const tempMix = Math.abs(temp) * 0.12;
+    this.tmpColor.copy(this.baseColor);
+    if (temp >= 0) this.tmpColor.lerp(this.warmTint, tempMix);
+    else this.tmpColor.lerp(this.coolTint, tempMix);
+
+    const ix = i * 3;
+    this.colors[ix + 0] = this.tmpColor.r;
+    this.colors[ix + 1] = this.tmpColor.g;
+    this.colors[ix + 2] = this.tmpColor.b;
   }
 }
 

@@ -1,5 +1,15 @@
 import * as THREE from 'three';
 
+const EARTH_RADIUS_M = 6371000;
+// Approx horizon distance at ~2m eye height (meters).
+const HORIZON_REF_HEIGHT_M = 2.0; // Reference camera height for layout scaling.
+const HORIZON_REF_M = horizonDistance_m(HORIZON_REF_HEIGHT_M);
+
+function horizonDistance_m(height_m: number): number {
+  const h = Math.max(0, height_m);
+  return Math.sqrt(h * (2 * EARTH_RADIUS_M + h));
+}
+
 /**
  * Simple silhouetted islands on the horizon to help sell scale and match the sunset reference.
  * These are intentionally lightweight and "cheat" by following the camera so they never drift away.
@@ -11,7 +21,7 @@ export class HorizonIslands {
   private readonly tmpLeft = new THREE.Vector3();
 
   private readonly islands: THREE.Mesh[] = [];
-  private readonly layout: Array<{ dist: number; side: number; scale: THREE.Vector3; y: number }> = [];
+  private readonly layout: Array<{ distFactor: number; sideFactor: number; scale: THREE.Vector3; y: number }> = [];
 
   constructor() {
     const mat = new THREE.MeshStandardMaterial({
@@ -25,17 +35,17 @@ export class HorizonIslands {
     // Left small island
     const i0 = this.makeIsland(mat, 420, 22);
     this.islands.push(i0);
-    this.layout.push({ dist: 5200, side: -2600, scale: new THREE.Vector3(1.2, 1.0, 0.8), y: -6 });
+    this.layout.push({ distFactor: 5200 / HORIZON_REF_M, sideFactor: -2600 / HORIZON_REF_M, scale: new THREE.Vector3(1.2, 1.0, 0.8), y: -6 });
 
     // Center distant low ridge
     const i1 = this.makeIsland(mat, 680, 26);
     this.islands.push(i1);
-    this.layout.push({ dist: 6100, side: 0, scale: new THREE.Vector3(2.6, 0.75, 0.8), y: -9 });
+    this.layout.push({ distFactor: 6100 / HORIZON_REF_M, sideFactor: 0, scale: new THREE.Vector3(2.6, 0.75, 0.8), y: -9 });
 
     // Right long island (reference-like)
     const i2 = this.makeIsland(mat, 760, 28);
     this.islands.push(i2);
-    this.layout.push({ dist: 5600, side: 2700, scale: new THREE.Vector3(3.0, 0.85, 0.9), y: -8 });
+    this.layout.push({ distFactor: 5600 / HORIZON_REF_M, sideFactor: 2700 / HORIZON_REF_M, scale: new THREE.Vector3(3.0, 0.85, 0.9), y: -8 });
 
     for (const m of this.islands) {
       m.castShadow = false;
@@ -61,14 +71,19 @@ export class HorizonIslands {
     // Left vector
     this.tmpLeft.set(0, 1, 0).cross(fwd).normalize();
 
+    const camHeight_m = Math.max(0.05, center.y - seaLevelY);
+    const horizonDist_m = horizonDistance_m(camHeight_m);
+
     for (let i = 0; i < this.islands.length; i++) {
       const m = this.islands[i];
       const L = this.layout[i];
+      const dist = horizonDist_m * L.distFactor;
+      const side = horizonDist_m * L.sideFactor;
 
       m.position.set(
-        center.x + fwd.x * L.dist + this.tmpLeft.x * L.side,
+        center.x + fwd.x * dist + this.tmpLeft.x * side,
         seaLevelY + L.y,
-        center.z + fwd.z * L.dist + this.tmpLeft.z * L.side
+        center.z + fwd.z * dist + this.tmpLeft.z * side
       );
       m.scale.copy(L.scale);
     }

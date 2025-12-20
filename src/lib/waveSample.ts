@@ -18,6 +18,12 @@ export interface WaveSampleOptions {
   applyCrestSharpness?: boolean;
 }
 
+export interface WaveSampleScratch {
+  /** Scratch buffers to avoid per-call allocations when sampling frequently. */
+  octaveCounts: Map<number, number>;
+  rogueMod: RogueWaveModulation;
+}
+
 const OCTAVE_REF_WAVELENGTH_M = 1.0;
 const HIGH_FREQ_OCTAVE = -2;
 const MAX_WAVES_PER_OCTAVE = 3;
@@ -44,7 +50,8 @@ export function sampleGerstner(
   tmpB: THREE.Vector3 = new THREE.Vector3(),
   rogue?: RogueWaveState,
   pulse?: SeismicPulseState | null,
-  opts?: WaveSampleOptions
+  opts?: WaveSampleOptions,
+  scratch?: WaveSampleScratch
 ): WaveSample {
   const disp = out.disp;
   disp.set(0, 0, 0);
@@ -57,8 +64,9 @@ export function sampleGerstner(
   let dydx = 0.0;
   let dydz = 0.0;
 
-  const octaveCounts = new Map<number, number>();
-  const mod: RogueWaveModulation = { A: 0, phase: 0, Q: 0 };
+  const octaveCounts = scratch?.octaveCounts ?? new Map<number, number>();
+  octaveCounts.clear();
+  const mod: RogueWaveModulation = scratch?.rogueMod ?? { A: 0, phase: 0, Q: 0 };
   const waveCount = waves.length;
   const includeTags = opts?.includeTags;
   const excludeTags = opts?.excludeTags;

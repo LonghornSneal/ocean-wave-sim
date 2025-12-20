@@ -16,6 +16,7 @@ import type { RigNodes } from './otter/types';
 THREE.Cache.enabled = true;
 
 const EVENT_WAVE_SAMPLE: WaveSampleOptions = { includeTags: ['event'], applyCrestSharpness: true };
+const CONTACT_MESH_NAMES = new Set(['Body', 'Back', 'Head', 'FlipperL', 'FlipperR', 'Tail']);
 
 export interface OtterInputs {
   /** 0..1. Higher = more gaze changes, more random exploration. */
@@ -117,6 +118,8 @@ export class SeaOtter {
   private readonly paddlePeriod_s = 1.6;
 
   private readonly wetMats: WetMaterialEntry[] = [];
+  private readonly contactMeshes: THREE.Mesh[] = [];
+  private contactMeshesVersion = 0;
 
   // Buoyancy sampling extents (in meters, around otter center)
   private readonly buoySampleFwd_m = 0.42;
@@ -233,6 +236,14 @@ export class SeaOtter {
   public getHeadWorldPosition(out = new THREE.Vector3()): THREE.Vector3 {
     if (this.nodes.head) return this.nodes.head.getWorldPosition(out);
     return out.copy(this.fallbackHeadOffset).applyMatrix4(this.group.matrixWorld);
+  }
+
+  public getContactMeshes(): THREE.Mesh[] {
+    return this.contactMeshes;
+  }
+
+  public getContactMeshesVersion(): number {
+    return this.contactMeshesVersion;
   }
 
   public isUnderwaterView(): boolean {
@@ -473,6 +484,7 @@ export class SeaOtter {
 
     this.cacheRigNodes();
     this.setupAnimations();
+    this.rebuildContactMeshes();
 
     this.appearanceMode = mode;
     this.furSilhouette = wantFur;
@@ -511,5 +523,17 @@ export class SeaOtter {
     this.whiskerTwitchAction = result.whiskerTwitchAction;
     this.blinkTimer_s = result.blinkTimer_s;
     this.wasUnderwater = result.wasUnderwater;
+  }
+
+  private rebuildContactMeshes(): void {
+    this.contactMeshes.length = 0;
+    if (!this.model) return;
+    this.model.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      if (!CONTACT_MESH_NAMES.has(mesh.name)) return;
+      this.contactMeshes.push(mesh);
+    });
+    this.contactMeshesVersion += 1;
   }
 }

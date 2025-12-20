@@ -120,6 +120,92 @@ export function buildWindSeaSpectrumFromU10(U10: number): WindSeaSpectrum {
   };
 }
 
+type BeaufortEntry = {
+  b: number;
+  windMin_mps: number;
+  windMax_mps: number;
+  swellHs_m: number;
+  swellTp_s: number;
+};
+
+// Approximate Beaufort sea-state mapping for swell defaults (open ocean).
+const BEAUFORT_TABLE: BeaufortEntry[] = [
+  { b: 0, windMin_mps: 0.0, windMax_mps: 0.5, swellHs_m: 0.0, swellTp_s: 1.5 },
+  { b: 1, windMin_mps: 0.5, windMax_mps: 1.5, swellHs_m: 0.1, swellTp_s: 2.0 },
+  { b: 2, windMin_mps: 1.6, windMax_mps: 3.3, swellHs_m: 0.25, swellTp_s: 3.0 },
+  { b: 3, windMin_mps: 3.4, windMax_mps: 5.4, swellHs_m: 0.6, swellTp_s: 4.0 },
+  { b: 4, windMin_mps: 5.5, windMax_mps: 7.9, swellHs_m: 1.1, swellTp_s: 5.0 },
+  { b: 5, windMin_mps: 8.0, windMax_mps: 10.7, swellHs_m: 2.0, swellTp_s: 6.2 },
+  { b: 6, windMin_mps: 10.8, windMax_mps: 13.8, swellHs_m: 3.0, swellTp_s: 7.5 },
+  { b: 7, windMin_mps: 13.9, windMax_mps: 17.1, swellHs_m: 4.5, swellTp_s: 9.0 },
+  { b: 8, windMin_mps: 17.2, windMax_mps: 20.7, swellHs_m: 6.4, swellTp_s: 10.6 },
+  { b: 9, windMin_mps: 20.8, windMax_mps: 24.4, swellHs_m: 8.2, swellTp_s: 12.2 },
+  { b: 10, windMin_mps: 24.5, windMax_mps: 28.4, swellHs_m: 9.8, swellTp_s: 13.8 },
+  { b: 11, windMin_mps: 28.5, windMax_mps: 32.6, swellHs_m: 11.6, swellTp_s: 15.0 },
+  { b: 12, windMin_mps: 32.7, windMax_mps: 45.0, swellHs_m: 13.5, swellTp_s: 16.5 }
+];
+
+function deepWaterWavelengthFromPeriod(Tp_s: number): number {
+  const T = Math.max(0.0, Tp_s);
+  return (G * T * T) / (2 * Math.PI);
+}
+
+export function beaufortFromMps(U10: number): number {
+  const U = Math.max(0.0, U10);
+  const last = BEAUFORT_TABLE[BEAUFORT_TABLE.length - 1];
+  if (U >= last.windMax_mps) return last.b;
+  for (let i = 0; i < BEAUFORT_TABLE.length; i++) {
+    const row = BEAUFORT_TABLE[i];
+    if (U <= row.windMax_mps) {
+      const lo = row.windMin_mps;
+      const hi = Math.max(lo + 1e-6, row.windMax_mps);
+      const t = clamp((U - lo) / (hi - lo), 0, 1);
+      return row.b + t;
+    }
+  }
+  return last.b;
+}
+
+export function beaufortToMps(beaufort: number): number {
+  const last = BEAUFORT_TABLE[BEAUFORT_TABLE.length - 1];
+  const b = clamp(beaufort, 0, last.b);
+  const i = Math.floor(b);
+  const t = b - i;
+  const a = BEAUFORT_TABLE[Math.min(i, BEAUFORT_TABLE.length - 1)];
+  const b1 = BEAUFORT_TABLE[Math.min(i + 1, BEAUFORT_TABLE.length - 1)];
+  const midA = 0.5 * (a.windMin_mps + a.windMax_mps);
+  const midB = 0.5 * (b1.windMin_mps + b1.windMax_mps);
+  return lerp(midA, midB, t);
+}
+
+export type BeaufortSwellState = {
+  beaufort: number;
+  windSpeed_mps: number;
+  swellHeight_m: number;
+  swellPeriod_s: number;
+  swellWavelength_m: number;
+};
+
+export function swellStateFromWindSpeed(U10: number): BeaufortSwellState {
+  const b = beaufortFromMps(U10);
+  const last = BEAUFORT_TABLE[BEAUFORT_TABLE.length - 1];
+  const bClamped = clamp(b, 0, last.b);
+  const i = Math.floor(bClamped);
+  const t = bClamped - i;
+  const a = BEAUFORT_TABLE[Math.min(i, BEAUFORT_TABLE.length - 1)];
+  const b1 = BEAUFORT_TABLE[Math.min(i + 1, BEAUFORT_TABLE.length - 1)];
+  const swellHeight_m = lerp(a.swellHs_m, b1.swellHs_m, t);
+  const swellPeriod_s = lerp(a.swellTp_s, b1.swellTp_s, t);
+  const swellWavelength_m = deepWaterWavelengthFromPeriod(swellPeriod_s);
+  return {
+    beaufort: bClamped,
+    windSpeed_mps: Math.max(0.0, U10),
+    swellHeight_m,
+    swellPeriod_s,
+    swellWavelength_m
+  };
+}
+
 /**
  * Compute a geostrophic wind estimate from a pressure drop and distance.
  * Ug ≈ (1/(rho * f)) * |∂p/∂n|
@@ -308,6 +394,8 @@ export interface SwellSpectrumInputs {
   swellVariance: number;
   /** Seed for deterministic swell spectrum (separate from wind). */
   seed: number;
+  /** Optional override for swell peak period (seconds). */
+  targetTp_s?: number;
 }
 
 export interface SwellSpectrum {
@@ -402,7 +490,10 @@ export function generateSwellSpectrum(inp: SwellSpectrumInputs): SwellSpectrum {
 
   const seed = Math.max(1, Math.floor(inp.seed));
   const jitter = randn(seed + 17.31, seed + 91.77) * 0.06;
-  const Tp = clamp(baseTp * (1.55 + 0.65 * swellVar + jitter), 7.0, 24.0);
+  const targetTp = inp.targetTp_s;
+  const Tp = typeof targetTp === 'number' && Number.isFinite(targetTp)
+    ? clamp(targetTp * (1 + jitter * 0.3), 5.0, 26.0)
+    : clamp(baseTp * (1.55 + 0.65 * swellVar + jitter), 7.0, 24.0);
   const fp = 1 / Tp;
 
   let fmin = Math.max(0.008, fp * 0.55);

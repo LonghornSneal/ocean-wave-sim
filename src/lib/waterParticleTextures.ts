@@ -12,6 +12,17 @@ function configureSpriteTexture(tex: THREE.CanvasTexture, name: string): THREE.T
   return tex;
 }
 
+function configureAlphaTexture(tex: THREE.CanvasTexture, name: string): THREE.Texture {
+  tex.name = name;
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.generateMipmaps = true;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.colorSpace = THREE.NoColorSpace;
+  return tex;
+}
+
 function traceDropletPath(ctx: CanvasRenderingContext2D, w: number, h: number): void {
   const topY = -h * 1.05;
   const midY = -h * 0.1;
@@ -174,5 +185,82 @@ function makeSplashTexture(): THREE.Texture {
   return configureSpriteTexture(tex, 'SplashTexture');
 }
 
+function makeSoftSpriteAlpha(): THREE.Texture {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+
+  const cx = size * 0.5;
+  const cy = size * 0.5;
+  const g = ctx.createRadialGradient(cx, cy, size * 0.06, cx, cy, size * 0.5);
+  g.addColorStop(0.0, 'rgba(255,255,255,0.95)');
+  g.addColorStop(0.35, 'rgba(255,255,255,0.7)');
+  g.addColorStop(0.7, 'rgba(255,255,255,0.35)');
+  g.addColorStop(1.0, 'rgba(255,255,255,0.0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  return configureAlphaTexture(tex, 'SoftSpriteAlpha');
+}
+
+function makeSnowTexture(): THREE.Texture {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  ctx.clearRect(0, 0, size, size);
+
+  const cx = size * 0.5;
+  const cy = size * 0.5;
+  const base = size * 0.18;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  const core = ctx.createRadialGradient(0, 0, 0, 0, 0, base * 1.45);
+  core.addColorStop(0, 'rgba(255,255,255,0.95)');
+  core.addColorStop(0.5, 'rgba(235,235,235,0.55)');
+  core.addColorStop(1, 'rgba(255,255,255,0.0)');
+  ctx.fillStyle = core;
+  ctx.beginPath();
+  ctx.arc(0, 0, base * 1.45, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth = 2.0;
+  for (let i = 0; i < 6; i++) {
+    const ang = (i / 6) * Math.PI * 2;
+    const x = Math.cos(ang) * base * 1.2;
+    const y = Math.sin(ang) * base * 1.2;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+  }
+
+  ctx.globalCompositeOperation = 'screen';
+  ctx.fillStyle = 'rgba(255,255,255,0.4)';
+  for (let i = 0; i < 6; i++) {
+    const ang = (i / 6) * Math.PI * 2 + Math.PI / 6;
+    const r = base * 0.55;
+    const x = Math.cos(ang) * r;
+    const y = Math.sin(ang) * r;
+    ctx.beginPath();
+    ctx.arc(x, y, base * 0.12, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+
+  const tex = new THREE.CanvasTexture(canvas);
+  return configureSpriteTexture(tex, 'SnowTexture');
+}
+
 export const DROPLET_TEX: THREE.Texture = makeDropletTexture();
 export const SPLASH_TEX: THREE.Texture = makeSplashTexture();
+export const SOFT_SPRITE_ALPHA: THREE.Texture = makeSoftSpriteAlpha();
+export const SNOW_TEX: THREE.Texture = makeSnowTexture();
